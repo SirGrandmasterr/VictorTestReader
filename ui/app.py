@@ -261,7 +261,7 @@ class EditorApp:
             textvariable=self.mode_var,
             state="readonly",
             values=self._mode_values(),
-            width=24,
+            width=21,
         )
         self.mode_combo.grid(row=0, column=1, padx=6, sticky="w")
         self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_selected)
@@ -285,11 +285,11 @@ class EditorApp:
         ).grid(row=0, column=4, padx=(10, 4), sticky="w")
         controls.columnconfigure(4, weight=1)
         self.save_preset_button = ttk.Button(
-            controls, text="Save as preset...", command=self.save_custom_preset
+            controls, text="Save preset...", command=self.save_custom_preset
         )
         self.save_preset_button.grid(row=0, column=5, padx=4)
         self.save_preset_button.grid_remove()  # shown once a Custom instruction was entered
-        ttk.Button(controls, text="Manage modes...", command=self.open_mode_dialog).grid(row=0, column=6)
+        ttk.Button(controls, text="Modes...", command=self.open_mode_dialog).grid(row=0, column=6)
         self.mode_description_var = tk.StringVar(value=PROMPTS["Grammar"])
         ttk.Label(
             controls,
