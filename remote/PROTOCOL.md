@@ -45,6 +45,25 @@ Closing the HTTP connection cancels the request: the relay sends a `cancel`
 frame to the agent, which drops its HTTP connection to vLLM, and vLLM aborts
 the generation.
 
+### Admin endpoints
+
+Available only when the relay runs with `RELAY_ADMIN_KEY`; they require
+`Authorization: Bearer <admin key>` (checked in constant time, separate from
+client and agent keys) and answer `404` while the key is unset, `401` on a
+wrong key. Responses carry `Cache-Control: no-store`.
+
+| Method | Path                  | Purpose                                                                 |
+|--------|-----------------------|-------------------------------------------------------------------------|
+| GET    | `/admin`              | HTML status page: agents, counters, key names, last 50 request outcomes. |
+| GET    | `/admin/keys`         | `{"keys": [{"name", "kind", "source": "env"\|"file", "created"}]}` — never the keys. |
+| POST   | `/admin/keys`         | Body `{"name": "...", "kind": "client"\|"agent"}`; `201 {"name", "kind", "key"}` — the key is returned exactly once. `409` when the name exists. |
+| DELETE | `/admin/keys/{name}`  | Revokes the key at once: `{"name", "kind", "agents_closed"}`; `404` for unknown names. |
+
+Keys created here are stored in `RELAY_KEYS_FILE` and merged with the
+environment keys (`RELAY_AGENT_KEYS`/`RELAY_CLIENT_KEYS`); revoking an
+environment key blocks it persistently. Revoking an agent key closes the
+agent's socket (close code `4004`).
+
 ### Throughput fields in `/status`
 
 Every entry of `agents` carries, besides `state`, `models`, `in_flight` and

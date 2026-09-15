@@ -9,7 +9,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY teai_relay ./teai_relay
 
 # Runs as an unprivileged user; Caddy terminates TLS in front of it.
-RUN useradd --system --no-create-home relay
+# /data holds keys.json (keys added through the admin API); mounted as a volume.
+RUN useradd --system --no-create-home relay && mkdir -p /data && chown relay:relay /data
+VOLUME ["/data"]
 USER relay
 
 EXPOSE 8080

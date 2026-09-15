@@ -10,6 +10,7 @@ from . import protocol
 log = logging.getLogger("teai_relay.registry")
 
 RATE_WINDOW = 60.0  # seconds over which chunks/s is averaged
+RECENT_REQUESTS = 50  # request outcomes kept for the admin page
 
 
 class AgentGone(Exception):
@@ -197,6 +198,17 @@ class AgentRegistry:
         self.requests_total = 0
         self.requests_failed = 0
         self.requests_cancelled = 0
+        self.recent = deque(maxlen=RECENT_REQUESTS)  # outcomes of the last requests, oldest first
+
+    def record_outcome(self, request_id, client, agent, model, status, duration, chunks):
+        """Remember how a request ended (never its content) for the admin page."""
+        self.recent.append({
+            "id": request_id, "client": client, "agent": agent, "model": model, "status": status,
+            "duration": round(duration, 2), "chunks": chunks, "finished_at": time.time(),
+        })
+
+    def agents_with_key(self, key_name):
+        return [agent for agent in self.agents.values() if agent.key_name == key_name]
 
     def register(self, agent):
         previous = self.agents.get(agent.name)

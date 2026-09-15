@@ -18,6 +18,8 @@ services:
       RELAY_PORT: "8080"
     expose:
       - "8080"
+    volumes:
+      - relay-data:/data   # keys.json: keys created through the admin API survive restarts
     logging:
       driver: json-file
       options:
@@ -41,5 +43,6 @@ services:
       - caddy-config:/config
 
 volumes:
+  relay-data:
   caddy-data:
   caddy-config:
