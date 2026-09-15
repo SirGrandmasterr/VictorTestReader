@@ -128,3 +128,36 @@ def test_missing_counts_report_no_usage():
     service.stream_edit("m", "i", "t", threading.Event(), on_usage=records.append)
 
     assert records == [] and service.last_usage is None
+
+
+def test_on_stream_receives_the_thinking_field_and_the_answer_as_they_arrive():
+    class ThinkingClient(FakeClient):
+        def chat(self, **kwargs):
+            return iter([
+                SimpleNamespace(message=SimpleNamespace(content="", thinking="Let me ")),
+                {"message": {"content": "", "thinking": "check."}},  # dict-style chunks work too
+                SimpleNamespace(message=SimpleNamespace(content="Edited ")),
+                SimpleNamespace(message=SimpleNamespace(content="text.")),
+            ])
+
+    pieces = []
+    result = OllamaService(ThinkingClient()).stream_edit(
+        "m", "i", "t", threading.Event(), on_stream=lambda kind, text: pieces.append((kind, text))
+    )
+
+    assert result == "Edited text."
+    assert pieces == [("thinking", "Let me "), ("thinking", "check."), ("answer", "Edited "), ("answer", "text.")]
+
+
+def test_on_stream_splits_inline_think_blocks_and_the_result_stays_clean():
+    client = FakeClient(chunks=["<think>\nplan", "</thi", "nk>\n\nEdited ", "text."])
+    pieces = []
+
+    result = OllamaService(client).stream_edit(
+        "m", "i", "t", threading.Event(), on_stream=lambda kind, text: pieces.append((kind, text))
+    )
+
+    assert result == "Edited text."
+    assert pieces == [("thinking", "\nplan"), ("answer", "Edited "), ("answer", "text.")]
+    # without a callback nothing changes
+    assert OllamaService(FakeClient(chunks=["<think>x</think>y"])).stream_edit("m", "i", "t", threading.Event()) == "y"

@@ -4,12 +4,14 @@ import time
 
 from .backend import (
     DEFAULT_MAX_TOKENS,
+    STREAM_THINKING,
     SYSTEM_PROMPT,
     TEMPERATURE,
     TOP_P,
     BackendUnavailable,
     EditCancelled,
     OutputTruncated,
+    ThinkingSplitter,
     UsageRecord,
     build_messages,
     strip_thinking,
@@ -96,13 +98,15 @@ class OllamaService:
         return value
 
     def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None,
-                 on_usage=None):
+                 on_usage=None, on_stream=None):
         """Stream one chat completion and return its text, honoring cancellation.
 
         ``response_format`` (a JSON schema dict) is passed as Ollama's ``format``
         so the answer is constrained to that schema. ``on_usage`` receives a
         ``UsageRecord`` built from ``prompt_eval_count``/``eval_count`` of the
-        final message when Ollama reports them.
+        final message when Ollama reports them. ``on_stream`` receives the
+        reasoning a thinking model sends in the message's ``thinking`` field
+        (Ollama 0.9+) or inline as a ``<think>`` block, and the answer text.
         """
         if self.client is None:
             raise OllamaUnavailable("The Ollama Python package is not installed.")
@@ -123,6 +127,7 @@ class OllamaService:
             request["format"] = response_format
         done_reason = None
         counts = None  # (prompt_eval_count, eval_count) from the final message
+        splitter = ThinkingSplitter(on_stream) if on_stream else None
         started = time.time()
         try:
             stream = self.client.chat(**request)
@@ -140,11 +145,19 @@ class OllamaService:
                 content = getattr(message, "content", None)
                 if content is None and isinstance(message, dict):
                     content = message.get("content")
+                if on_stream:
+                    thinking = getattr(message, "thinking", None)
+                    if thinking is None and isinstance(message, dict):
+                        thinking = message.get("thinking")
+                    if thinking:
+                        on_stream(STREAM_THINKING, thinking)
                 if content:
                     chunks.append(content)
                     received += len(content)
                     if on_progress:
                         on_progress(received)
+                    if splitter:
+                        splitter.feed(content)
                 reason = self._field(response, "done_reason")
                 if reason:
                     done_reason = reason
@@ -155,6 +168,8 @@ class OllamaService:
                         counts = (int(prompt_count or 0), int(eval_count or 0))
                     except (TypeError, ValueError):
                         pass
+            if splitter:
+                splitter.flush()
         except EditCancelled:
             raise
         except Exception as exc:
@@ -171,7 +186,7 @@ class OllamaService:
         return strip_thinking("".join(chunks))
 
     def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False,
-                    on_usage=None):
+                    on_usage=None, on_stream=None):
         """Return an edited document while honoring a cancellation event.
 
         ``on_progress`` (optional) receives the number of characters received
@@ -180,7 +195,7 @@ class OllamaService:
         """
         result = self.generate(
             model, build_messages(instruction, text, text_first), cancel_event, on_progress=on_progress,
-            on_usage=on_usage,
+            on_usage=on_usage, on_stream=on_stream,
         )
         if not result.strip():
             raise OllamaUnavailable("Ollama returned an empty response.")

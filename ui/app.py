@@ -39,11 +39,13 @@ from core.settings import (
     clamp_ui_scale,
 )
 from core.text_positions import char_offset, normalise_span, tk_index
+from core.workflow import CHECK_LABELS, STREAM_EVENT
 from .connection_dialog import ConnectionDialog
 from .i18n import N_, current_language, format_number, resolve_language, set_language, tr
 from .mode_dialog import ManageModesDialog
 from .review_panel import ReviewPanel
 from .theme import PALETTE, Tooltip, apply_theme, font, style_text, subscribe
+from .thinking_window import StreamLog, ThinkingWindow
 from .workflow_screen import WorkflowScreen
 
 # connection label states (colour plus a glyph, see _set_connection)
@@ -155,6 +157,8 @@ class EditorApp:
         self.modified = False
         self.session_usage = empty_usage()  # token counts of every request since the app started
         self._connection = ("", COLOR_NEUTRAL)  # last message and state of the connection label
+        self.thinking_log = StreamLog()  # reasoning streamed by the last requests (View > Model thinking)
+        self.thinking_window = None
 
         self.root.title(APP_TITLE)
         self.root.geometry("1120x780")
@@ -206,6 +210,9 @@ class EditorApp:
         view_menu.add_command(label=tr("Larger text"), underline=0, accelerator="Ctrl++", command=lambda: self.zoom(1))
         view_menu.add_command(label=tr("Smaller text"), underline=0, accelerator="Ctrl+-", command=lambda: self.zoom(-1))
         view_menu.add_command(label=tr("Normal text size"), underline=0, accelerator="Ctrl+0", command=lambda: self.zoom(0))
+        view_menu.add_separator()
+        view_menu.add_command(label=tr("Model thinking..."), underline=6, accelerator="Ctrl+Shift+T",
+                              command=self.show_thinking)
         view_menu.add_separator()
         self.high_contrast_var = tk.BooleanVar(value=bool(self.settings.high_contrast))
         view_menu.add_checkbutton(label=tr("High contrast"), underline=0, variable=self.high_contrast_var,
@@ -446,6 +453,9 @@ class EditorApp:
             bottom, text=tr("Cancel"), command=self.cancel_generation, state=tk.DISABLED
         )
         self.cancel_button.pack(side=tk.LEFT, padx=6)
+        self.thinking_button = ttk.Button(bottom, text=tr("Thinking..."), command=self.show_thinking)
+        self.thinking_button.pack(side=tk.LEFT)
+        Tooltip(self.thinking_button, tr("Watch the model's reasoning while it works (View menu, Ctrl+Shift+T)."))
         self.status_var = tk.StringVar(
             value=tr("Paste text, choose an editing mode, then review suggestions.")
         )
@@ -460,9 +470,11 @@ class EditorApp:
         self.usage_tooltip = Tooltip(self.usage_label, "")
         self.progress.pack_forget()
         self.cancel_button.pack_forget()
+        self.thinking_button.pack_forget()
 
     def _bind_shortcuts(self):
         self.root.bind_all("<Control-Return>", self._primary_shortcut)
+        self.root.bind_all("<Control-Shift-KeyPress-T>", self.show_thinking)
         self.root.bind_all("<Control-KeyPress-o>", self._open_shortcut)
         self.root.bind_all("<Control-KeyPress-O>", self._open_shortcut)
         self.root.bind_all("<Control-KeyPress-s>", self._save_shortcut)
@@ -1016,11 +1028,30 @@ class EditorApp:
         def on_progress(received):
             self._progress_chars = received
 
+        # The request the thinking window is told about: one per chain step, one for the
+        # explanations (events as in core.workflow.start_stream, all from the worker thread).
+        stream = {"key": None}
+
+        def begin_stream(step, info):
+            end_stream("done")
+            stream["key"] = ("quick", request_id, step)
+            self.events.put((STREAM_EVENT, stream["key"], "started", info))
+
+        def end_stream(outcome):
+            if stream["key"] is not None:
+                self.events.put((STREAM_EVENT, stream["key"], "finished", outcome))
+                stream["key"] = None
+
+        def on_stream(kind, text):
+            if stream["key"] is not None:
+                self.events.put((STREAM_EVENT, stream["key"], kind, text))
+
         def on_step(index, total, name):
             self._progress_chars = 0
             if total > 1:
                 self.generation_verb = tr("Step {index}/{total}: {name}{scope}", index=index, total=total,
                                           name=self.mode_label(name), scope=scope)
+            begin_stream(index, {"scope": "quick", "mode": name, "step": index, "total": total})
 
         def on_usage(record):
             self.events.put(("usage", record))
@@ -1029,8 +1060,9 @@ class EditorApp:
             try:
                 chain = run_chain(
                     service, model, steps, source, cancel_event, on_step=on_step, on_progress=on_progress,
-                    on_usage=on_usage,
+                    on_usage=on_usage, on_stream=on_stream,
                 )
+                end_stream("done")
                 session = build_edit_session(
                     source,
                     chain.text,
@@ -1044,16 +1076,23 @@ class EditorApp:
                 if explain and session.review_items:
                     self.generation_verb = tr("Explaining changes")
                     self._progress_chars = 0
+                    begin_stream("explain", {"scope": "quick_explain"})
                     try:
-                        explain_session(service, model, session, explain_instruction, cancel_event, on_usage=on_usage)
+                        explain_session(
+                            service, model, session, explain_instruction, cancel_event, on_usage=on_usage,
+                            on_stream=on_stream,
+                        )
+                        end_stream("done")
                     except EditCancelled:
-                        pass  # the edit itself is done: open the review without explanations
+                        end_stream("cancelled")  # the edit itself is done: open the review without explanations
                     except Exception:
-                        pass  # explanations are best effort
+                        end_stream("error")  # explanations are best effort
                 self.events.put(("generation_result", request_id, revision_id, session))
             except EditCancelled as exc:
+                end_stream("cancelled")
                 self.events.put(("generation_cancelled", request_id, exc))
             except Exception as exc:
+                end_stream("error")
                 self.events.put(("generation_error", request_id, exc))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1069,12 +1108,14 @@ class EditorApp:
         if generating:
             self.progress.pack(side=tk.LEFT, before=self.status_label)
             self.cancel_button.pack(side=tk.LEFT, padx=6, before=self.status_label)
+            self.thinking_button.pack(side=tk.LEFT, padx=(0, 6), before=self.status_label)
             self.progress.start(12)
             self.set_status(tr("{verb} with {target}...", verb=self.generation_verb, target=self.generation_label))
         else:
             self.progress.stop()
             self.progress.pack_forget()
             self.cancel_button.pack_forget()
+            self.thinking_button.pack_forget()
 
     def cancel_generation(self):
         if self.generating and self.cancel_event:
@@ -1148,6 +1189,8 @@ class EditorApp:
                     self._handle_generation_cancelled(event[1])
                 elif kind == "usage":
                     self.record_usage(event[1])
+                elif kind == STREAM_EVENT:
+                    self.thinking_log.handle(event[1], event[2], event[3])
                 elif kind == "workflow_usage":
                     self.workflow_screen.handle_event(event)  # adds to the project total
                     self.record_usage(event[1])
@@ -1161,8 +1204,11 @@ class EditorApp:
         ):
             elapsed = int(time.time() - self.generation_started_at)
             received = self._progress_chars
+            thinking = self._active_thinking_chars()
             if received:
                 progress = tr(" · {received} characters received", received=format_number(received))
+            elif thinking:
+                progress = tr(" · thinking ({count} characters)", count=format_number(thinking))
             else:
                 progress = tr(" · waiting for the first tokens")
             self.set_status(
@@ -1173,6 +1219,77 @@ class EditorApp:
             self.root.after(100, self._poll_events)
         except tk.TclError:
             pass
+
+    # ---------------------------------------------------------- model thinking
+    def _active_thinking_chars(self):
+        """Reasoning characters streamed so far by the running quick-edit request."""
+        return sum(
+            entry.thinking_chars for entry in self.thinking_log.active_entries()
+            if entry.key[:2] == ("quick", self.active_request_id)
+        )
+
+    def show_thinking(self, event=None):
+        """Open (or raise) the window that shows the model's reasoning as it streams (View menu, Ctrl+Shift+T)."""
+        if self.thinking_window is not None and self.thinking_window.winfo_exists():
+            self.thinking_window.deiconify()
+            self.thinking_window.lift()
+            self.thinking_window.focus_set()
+        else:
+            self.thinking_window = ThinkingWindow(
+                self.root, self.thinking_log, describe=self.describe_request, hint=self.thinking_hint
+            )
+        return "break" if event else None
+
+    def describe_request(self, info):
+        """Label of one streamed request in the thinking window (``info`` as the producers publish it)."""
+        scope = info.get("scope")
+        if scope == "quick":
+            label = tr("Quick edit · {mode}", mode=self.mode_label(info.get("mode") or ""))
+            if (info.get("total") or 1) > 1:
+                label += tr(" · step {index}/{total}", index=info.get("step"), total=info.get("total"))
+            return label
+        if scope == "quick_explain":
+            return tr("Quick edit · explanations")
+        if scope == "combined":
+            return tr("{segment} · all checks", segment=self._describe_segment(info.get("chapter"), info.get("segment")))
+        if scope == "evaluate":
+            return tr("{segment} · {check}", segment=self._describe_segment(info.get("chapter"), info.get("segment")),
+                      check=self._check_label(info.get("check")))
+        if scope == "explain":
+            segments = info.get("segments") or []
+            check = self._check_label(info.get("check"))
+            if len(segments) > 1:
+                return tr("Explanations · {check} · {segment} and {more} more", check=check,
+                          segment=self._describe_segment(*segments[0]), more=len(segments) - 1)
+            if segments:
+                return tr("Explanations · {check} · {segment}", check=check, segment=self._describe_segment(*segments[0]))
+            return tr("Explanations · {check}", check=check)
+        if scope == "consistency":
+            return tr("Consistency check · batch {batch} of {total}", batch=info.get("batch"), total=info.get("total"))
+        if scope == "outline":
+            return tr("Chapter outline")
+        return tr("Request")
+
+    @staticmethod
+    def _check_label(check):
+        return tr(CHECK_LABELS[check]) if check in CHECK_LABELS else str(check)
+
+    def _describe_segment(self, chapter_index, segment_index):
+        project = self.workflow_screen.project if hasattr(self, "workflow_screen") else None
+        chapter, segment = project.find(chapter_index, segment_index) if project is not None else (None, None)
+        if chapter is not None and chapter.title:
+            return tr("{title} · Segment {index}", title=chapter.title, index=segment.index)
+        return tr("Chapter {chapter} · Segment {segment}", chapter=chapter_index, segment=segment_index)
+
+    def thinking_hint(self):
+        """Why the current backend may send no reasoning (shown in the thinking window)."""
+        if self.settings.backend == BACKEND_REMOTE and not self.settings.remote_enable_thinking:
+            return tr("Thinking is switched off for this connection profile: turn on \u201cAllow the model to think "
+                      "before answering\u201d in the Connection dialog to see the model's reasoning.")
+        if self.settings.backend == BACKEND_OLLAMA:
+            return tr("Ollama sends reasoning only for thinking models such as qwen3 or deepseek-r1.")
+        return tr("The server has to separate the reasoning (vLLM with a reasoning parser) or the model has to "
+                  "write it in <think> blocks.")
 
     # ------------------------------------------------------------------ review
     def apply_review(self, session):

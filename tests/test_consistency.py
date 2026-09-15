@@ -241,7 +241,7 @@ class VerdictService:
         self.delay = delay
         self.requests = []
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, on_usage=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, on_usage=None, on_stream=None):
         self.requests.append(messages)
         if self.fail:
             raise BackendUnavailable("down")
@@ -282,9 +282,18 @@ def test_runner_batches_requests_and_reports_verdicts_progress_and_errors(tmp_pa
     assert runner.start() == 2 and runner.total == 2
     collected = drain(events)
     assert not runner.active
+    streams = [event[1:] for event in collected if event[0] == "stream"]
+    collected = [event for event in collected if event[0] != "stream"]
     kinds = [event[0] for event in collected]
     assert kinds == ["consistency_verdicts", "consistency_progress", "consistency_verdicts", "consistency_progress",
                      "consistency_finished"]
+    # every request is announced to the thinking view and closed again
+    assert streams == [
+        (("consistency", 1), "started", {"scope": "consistency", "batch": 1, "total": 2}),
+        (("consistency", 1), "finished", "done"),
+        (("consistency", 2), "started", {"scope": "consistency", "batch": 2, "total": 2}),
+        (("consistency", 2), "finished", "done"),
+    ]
     assert collected[1][1:] == (1, 2) and collected[3][1:] == (2, 2)
     verdicts, error = collected[-1][1:]
     assert error is None and len(verdicts) == len(triaged) + 20
@@ -304,6 +313,7 @@ def test_runner_batches_requests_and_reports_verdicts_progress_and_errors(tmp_pa
     ConsistencyRunner(project, fresh, VerdictService(fail=True), "m", events).start()
     collected = drain(events)
     assert collected[-1][0] == "consistency_finished" and collected[-1][2] == "down" and collected[-1][1] == {}
+    assert collected[-2] == ("stream", ("consistency", 1), "finished", "error")
     assert all(f.status == STATUS_UNVERIFIED for f in fresh if f.kind in MODEL_TRIAGED)
 
     # cancellation finishes without error
@@ -313,4 +323,6 @@ def test_runner_batches_requests_and_reports_verdicts_progress_and_errors(tmp_pa
     time.sleep(0.1)
     runner.cancel()
     collected = drain(events)
-    assert collected == [("consistency_finished", {}, None)]
+    assert collected[-1] == ("consistency_finished", {}, None)
+    assert [event for event in collected if event[0] != "stream"] == [("consistency_finished", {}, None)]
+    assert collected[-2] == ("stream", ("consistency", 1), "finished", "cancelled")

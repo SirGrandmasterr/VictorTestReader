@@ -101,7 +101,7 @@ class LongRunService(FakeService):
                 self.requests["failed"] += 1
             raise BackendUnavailable("transient")
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None, on_stream=None):
         self._roll("edit", cancel_event)
         if instruction.startswith("Correct spelling"):
             return text.replace("teh", "the")
@@ -110,7 +110,7 @@ class LongRunService(FakeService):
         return text.replace("very very", "extremely")
 
     def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None,
-                 on_usage=None):
+                 on_usage=None, on_stream=None):
         content = messages[1]["content"]
         if content.startswith("Review the text below"):
             self._roll("combined", cancel_event)

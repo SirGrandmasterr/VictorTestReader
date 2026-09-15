@@ -20,10 +20,12 @@ class FakeService:
         self.calls = []
         self.cancel_after = cancel_after  # set the cancel event after this many edits
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None, on_stream=None):
         self.calls.append((instruction, text))
         if on_progress:
             on_progress(len(text))
+        if on_stream:
+            on_stream("thinking", "about " + instruction)
         if self.cancel_after is not None and len(self.calls) >= self.cancel_after:
             cancel_event.set()
         if cancel_event.is_set() and self.cancel_after is None:
@@ -34,7 +36,7 @@ class FakeService:
             return text.upper()
         return text + " (" + instruction + ")"
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None, on_stream=None):
         raise AssertionError("not used")
 
 
@@ -49,6 +51,13 @@ def test_run_chain_feeds_each_output_into_the_next_step():
     assert result.steps == [ChainStep("Fix", "fix", "the cat"), ChainStep("Loud", "upper", "THE CAT")]
     assert service.calls == [("fix", "teh cat"), ("upper", "the cat")]
     assert seen == [(1, 2, "Fix"), (2, 2, "Loud")]
+
+
+def test_run_chain_hands_the_stream_callback_to_every_step():
+    pieces = []
+    run_chain(FakeService(), "m", [("Fix", "fix"), ("Loud", "upper")], "teh", threading.Event(),
+              on_stream=lambda kind, text: pieces.append((kind, text)))
+    assert pieces == [("thinking", "about fix"), ("thinking", "about upper")]
 
 
 def test_plain_instruction_strings_work_as_steps():
@@ -83,7 +92,7 @@ class ExplainingService(FakeService):
         self.cancel = cancel
         self.requests = []
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None, on_stream=None):
         self.requests.append((messages, max_tokens))
         if self.cancel:
             raise EditCancelled("cancelled")

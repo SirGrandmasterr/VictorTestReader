@@ -123,6 +123,11 @@ class FakeRelay:
                         self.wfile.write(sse(chunk(None, finish_reason="length")))
                     elif relay.mode == "stream_error":
                         self.wfile.write(sse({"error": {"message": "agent disconnected"}}))
+                    elif relay.mode == "inline_think":  # no reasoning parser on the server
+                        self.wfile.write(sse(chunk("<thi")))
+                        self.wfile.write(sse(chunk("nk>plan</think>\n\nEdited ")))
+                        self.wfile.write(sse(chunk("text.")))
+                        self.wfile.write(sse(chunk(None, finish_reason="stop")))
                     else:
                         self.wfile.write(sse(chunk(None, reasoning_content="thinking...")))
                         self.wfile.write(sse(chunk("Edited ")))
@@ -298,6 +303,24 @@ def test_no_models_hint_reflects_agent_state():
     service.last_status = {"agents": [{"name": "gpu-1", "state": "loading"}]}
     assert "gpu-1 is still loading" in service.no_models_hint()
     assert service.connection_summary() == "Connected · gpu-1 loading"
+
+
+def test_on_stream_receives_reasoning_content_and_the_answer_as_they_arrive(relay):
+    service = RemoteService(relay.url, "secret")
+    pieces = []
+
+    result = service.stream_edit("qwen-27b", "Fix grammar.", "Original.", threading.Event(),
+                                 on_stream=lambda kind, text: pieces.append((kind, text)))
+
+    assert result == "Edited text."
+    assert pieces == [("thinking", "thinking..."), ("answer", "Edited "), ("answer", "text.")]
+
+    relay.mode = "inline_think"
+    pieces = []
+    result = service.generate("qwen-27b", [{"role": "user", "content": "x"}], threading.Event(),
+                              on_stream=lambda kind, text: pieces.append((kind, text)))
+    assert result == "Edited text."
+    assert pieces == [("thinking", "plan"), ("answer", "Edited "), ("answer", "text.")]
 
 
 def test_strip_thinking_removes_reasoning_blocks():

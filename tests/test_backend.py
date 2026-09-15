@@ -1,6 +1,6 @@
-"""Tests for the shared backend helpers (prompt construction)."""
+"""Tests for the shared backend helpers (prompt construction, streamed reasoning)."""
 
-from core.backend import SYSTEM_PROMPT, TEXT_FIRST_NOTE, build_messages
+from core.backend import STREAM_ANSWER, STREAM_THINKING, SYSTEM_PROMPT, TEXT_FIRST_NOTE, ThinkingSplitter, build_messages
 
 
 def test_default_order_is_instruction_then_text_and_unchanged():
@@ -44,3 +44,40 @@ def test_usage_totals_accumulate_and_format():
     assert normalise_usage({"prompt_tokens": "7", "seconds": None, "requests": "x"}) == {
         "prompt_tokens": 7, "completion_tokens": 0, "requests": 0, "seconds": 0.0,
     }
+
+
+# ------------------------------------------------------ streamed reasoning
+def split(chunks):
+    """Feed ``chunks`` through a ThinkingSplitter and return the (kind, text) pieces it hands out."""
+    pieces = []
+    splitter = ThinkingSplitter(lambda kind, text: pieces.append((kind, text)))
+    for chunk in chunks:
+        splitter.feed(chunk)
+    splitter.flush()
+    return pieces
+
+
+def test_splitter_routes_a_leading_think_block_even_when_tags_straddle_chunks():
+    assert split(["<thi", "nk>\nplan ", "more</th", "ink>\n\nEdited."]) == [
+        (STREAM_THINKING, "\nplan "), (STREAM_THINKING, "more"), (STREAM_ANSWER, "Edited."),
+    ]
+    assert split(["  <think>a</think>b", "c"]) == [(STREAM_THINKING, "a"), (STREAM_ANSWER, "b"), (STREAM_ANSWER, "c")]
+
+
+def test_splitter_passes_plain_answers_and_non_leading_tags_through():
+    assert split(["Plain ", "text"]) == [(STREAM_ANSWER, "Plain "), (STREAM_ANSWER, "text")]
+    assert split(["Hello <think>x</think>"]) == [(STREAM_ANSWER, "Hello <think>x</think>")]
+    assert split(["<t"]) == [(STREAM_ANSWER, "<t")]  # looked like a tag until the stream ended
+    assert split(["", "   "]) == []
+
+
+def test_splitter_keeps_an_unterminated_block_as_reasoning():
+    assert split(["<think>unterminated ", "reason", "</thi"]) == [
+        (STREAM_THINKING, "unterminated "), (STREAM_THINKING, "reason"), (STREAM_THINKING, "</thi"),
+    ]
+
+
+def test_splitter_without_callback_is_inert():
+    splitter = ThinkingSplitter(None)
+    splitter.feed("<think>x</think>y")
+    splitter.flush()

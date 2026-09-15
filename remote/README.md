@@ -128,7 +128,8 @@ precedence.
   (and make sure `VLLM_MAX_MODEL_LEN` leaves room for input + output).
 - **Thinking text in the output** – keep *Allow the model to think* off, or run
   vLLM with `--reasoning-parser qwen3` (default in `.env.example`) so reasoning
-  goes to `reasoning_content`; the client also strips `<think>` blocks.
+  goes to `reasoning_content`; the client also strips `<think>` blocks. Either
+  way the desktop app shows the reasoning live under *View → Model thinking*.
 
 ## Tests
 

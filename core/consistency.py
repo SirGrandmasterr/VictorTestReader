@@ -22,7 +22,14 @@ from typing import Dict, List
 
 from .backend import EditCancelled
 from .change_kinds import levenshtein
-from .workflow import EXPLANATION_SYSTEM_PROMPT, _parse_json_object, applied_changes, new_decision_group
+from .workflow import (
+    EXPLANATION_SYSTEM_PROMPT,
+    _parse_json_object,
+    applied_changes,
+    finish_stream,
+    new_decision_group,
+    start_stream,
+)
 
 FINDING_NAME = "name"
 FINDING_HYPHENATION = "hyphenation"
@@ -624,18 +631,24 @@ class ConsistencyRunner:
     def _run(self):
         collected = {}
         error = None
-        for batch in self.batches:
+        for number, batch in enumerate(self.batches, 1):
             if self.cancel_event.is_set():
                 break
+            stream_key = ("consistency", number)
+            on_stream = start_stream(self.events, stream_key,
+                                     {"scope": "consistency", "batch": number, "total": self.total})
             try:
                 answer = self.service.generate(self.model, build_consistency_messages(self.project, batch),
                                                self.cancel_event, max_tokens=self.max_tokens,
-                                               on_usage=self._report_usage)
+                                               on_usage=self._report_usage, on_stream=on_stream)
             except EditCancelled:
+                finish_stream(self.events, stream_key, "cancelled")
                 break
             except Exception as exc:  # the UI reports it; the findings stay unverified
+                finish_stream(self.events, stream_key, "error")
                 error = str(exc)
                 break
+            finish_stream(self.events, stream_key, "done")
             verdicts = parse_verdicts(answer)
             collected.update(verdicts)
             self.done += 1

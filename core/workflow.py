@@ -1859,7 +1859,8 @@ def sanity_check_proposal(original, proposed):
         )
 
 
-def evaluate(service, model, text, check, cancel_event, retries=1, style_guide="", glossary=None, on_usage=None):
+def evaluate(service, model, text, check, cancel_event, retries=1, style_guide="", glossary=None, on_usage=None,
+             on_stream=None):
     """Run the edit request of one check on one segment; returns a CheckResult without explanations.
 
     Edits are requested with ``text_first=True``: the segment comes before the
@@ -1868,9 +1869,10 @@ def evaluate(service, model, text, check, cancel_event, retries=1, style_guide="
     holds the author's standing instructions; they are appended to the check's
     instruction. ``glossary`` lists protected terms: they are named in the
     prompt and any change touching one is moved to ``CheckResult.suppressed``
-    instead of being proposed. ``on_usage`` is handed to the backend and
-    receives the token counts of every request, retries included. Never raises
-    except on cancel.
+    instead of being proposed. ``on_usage`` and ``on_stream`` are handed to
+    the backend: the former receives the token counts of every request,
+    retries included, the latter the streamed reasoning and answer text.
+    Never raises except on cancel.
     """
     started = time.time()
     attempt = 0
@@ -1878,7 +1880,9 @@ def evaluate(service, model, text, check, cancel_event, retries=1, style_guide="
     while True:
         try:
             proposed = strip_fences(
-                service.stream_edit(model, instruction, text, cancel_event, text_first=True, on_usage=on_usage)
+                service.stream_edit(
+                    model, instruction, text, cancel_event, text_first=True, on_usage=on_usage, on_stream=on_stream,
+                )
             ).strip("\n")
             sanity_check_proposal(text, proposed)
             break
@@ -1912,7 +1916,7 @@ def finish_explanations(result):
 
 
 def request_explanations(service, model, entries, check, cancel_event, language=SAME_LANGUAGE, style_guide="",
-                         on_usage=None):
+                         on_usage=None, on_stream=None):
     """Ask the model to explain the changes of one or more segments; returns {number: text}.
 
     ``entries`` is a list of ``(segment_text, changes)``; numbers continue
@@ -1924,7 +1928,7 @@ def request_explanations(service, model, entries, check, cancel_event, language=
     try:
         answer = service.generate(
             model, build_grouped_explanation_messages(entries, check, language, style_guide), cancel_event,
-            max_tokens=EXPLANATION_MAX_TOKENS, on_usage=on_usage,
+            max_tokens=EXPLANATION_MAX_TOKENS, on_usage=on_usage, on_stream=on_stream,
         )
     except EditCancelled:
         raise
@@ -1940,31 +1944,39 @@ def distribute_explanations(changes, numbered):
             change.explanation = numbered[number]
 
 
-def explain_result(service, model, text, result, cancel_event, language=SAME_LANGUAGE, style_guide="", on_usage=None):
+def explain_result(service, model, text, result, cancel_event, language=SAME_LANGUAGE, style_guide="", on_usage=None,
+                   on_stream=None):
     """Explain the changes of one evaluated result: canned sentences first, one request for the rest."""
     remaining = apply_canned_explanations(text, result.changes, language)
     if remaining:
         numbered = request_explanations(
-            service, model, [(text, remaining)], result.check, cancel_event, language, style_guide, on_usage=on_usage
+            service, model, [(text, remaining)], result.check, cancel_event, language, style_guide, on_usage=on_usage,
+            on_stream=on_stream,
         )
         distribute_explanations(remaining, numbered)
     return finish_explanations(result)
 
 
 def run_check(service, model, text, check, cancel_event, explain=True, language=SAME_LANGUAGE, retries=1,
-              style_guide="", glossary=None, on_usage=None):
+              style_guide="", glossary=None, on_usage=None, on_stream=None):
     """Evaluate one check on one segment and explain its changes; returns a CheckResult.
 
     Convenience wrapper around ``evaluate`` and ``explain`` for callers that
     want one result per call (the combined-mode fallback, scripts, tests).
     The runner uses the two steps separately so explanations can be batched.
-    ``on_usage`` receives the token counts of every request made.
+    ``on_usage`` receives the token counts of every request made and
+    ``on_stream`` their streamed reasoning and answer text.
     """
-    result = evaluate(service, model, text, check, cancel_event, retries, style_guide, glossary, on_usage=on_usage)
+    result = evaluate(
+        service, model, text, check, cancel_event, retries, style_guide, glossary, on_usage=on_usage,
+        on_stream=on_stream,
+    )
     if result.status != "done":
         return result
     if explain:
-        return explain_result(service, model, text, result, cancel_event, language, style_guide, on_usage=on_usage)
+        return explain_result(
+            service, model, text, result, cancel_event, language, style_guide, on_usage=on_usage, on_stream=on_stream,
+        )
     return finish_explanations(result)
 
 
@@ -2085,14 +2097,15 @@ def parse_combined(text, answer, options=None):
 
 
 def run_segment_combined(service, model, text, options, cancel_event, structured=True,
-                         on_structured_unsupported=None, on_usage=None):
+                         on_structured_unsupported=None, on_usage=None, on_stream=None):
     """Evaluate every enabled check of one segment with a single request.
 
     Falls back to ``run_check`` per check (results marked ``separate``) when
     the answer cannot be parsed or anchored, when the backend fails, or when
     it rejects the JSON schema; in the last case ``on_structured_unsupported``
     is called so the runner can stop asking for structured output.
-    ``on_usage`` receives the token counts of every request made.
+    ``on_usage`` receives the token counts of every request made and
+    ``on_stream`` their streamed reasoning and answer text.
     """
     started = time.time()
     checks = options.enabled_checks() or list(CHECKS)
@@ -2101,7 +2114,7 @@ def run_segment_combined(service, model, text, options, cancel_event, structured
     try:
         answer = service.generate(
             model, messages, cancel_event, max_tokens=COMBINED_MAX_TOKENS,
-            response_format=COMBINED_SCHEMA if structured else None, on_usage=on_usage,
+            response_format=COMBINED_SCHEMA if structured else None, on_usage=on_usage, on_stream=on_stream,
         )
         results = parse_combined(text, strip_fences(answer), options)
     except EditCancelled:
@@ -2121,10 +2134,36 @@ def run_segment_combined(service, model, text, options, cancel_event, structured
         check: run_check(
             service, model, text, check, cancel_event, explain=options.explain,
             language=options.language, style_guide=options.style_guide, glossary=options.glossary,
-            on_usage=on_usage,
+            on_usage=on_usage, on_stream=on_stream,
         )
         for check in checks
     }
+
+
+# ----------------------------------------------------------- stream events
+# The text a request streams is published on the event queue as
+# ("stream", key, kind, payload): kind "started" (payload: a dict describing
+# the request, "scope" plus scope-specific fields), then "thinking" /
+# "answer" (payload: the text piece, see core.backend.on_stream), finally
+# "finished" (payload: "done", "error" or "cancelled"). ``key`` identifies the
+# request and is unique per producer: ("review", chapter, segment, check),
+# ("explain", n), ("consistency", n), ("quick", request_id, step), ...
+STREAM_EVENT = "stream"
+
+
+def start_stream(events, key, info):
+    """Publish the start of a request and return its ``on_stream`` callback."""
+    events.put((STREAM_EVENT, key, "started", info))
+
+    def on_stream(kind, text):
+        events.put((STREAM_EVENT, key, kind, text))
+
+    return on_stream
+
+
+def finish_stream(events, key, outcome):
+    """Publish the end of a request (``outcome``: done, error or cancelled)."""
+    events.put((STREAM_EVENT, key, "finished", outcome))
 
 
 class ProjectRunner:
@@ -2136,8 +2175,10 @@ class ProjectRunner:
     when it ends, and finally ``("workflow_finished", cancelled)``. Every
     request whose token counts the backend reports also produces
     ``("workflow_usage", UsageRecord)``, which the caller adds to
-    ``Project.usage``. The caller applies results to the project on its own
-    thread, so the runner never mutates project state.
+    ``Project.usage``. The text every request streams is published as
+    ``("stream", key, kind, payload)`` events (see ``start_stream``) so the
+    UI can show the model's reasoning live. The caller applies results to the
+    project on its own thread, so the runner never mutates project state.
 
     In combined mode a task covers a whole segment: one request answers every
     pending check, and the runner still emits one ``workflow_started`` and one
@@ -2278,6 +2319,13 @@ class ProjectRunner:
         """Backend callback (worker thread): hand the token counts to the UI thread."""
         self.events.put(("workflow_usage", record))
 
+    def _start_stream(self, key, info):
+        """Announce a request and return the ``on_stream`` callback that publishes its text."""
+        return start_stream(self.events, key, info)
+
+    def _finish_stream(self, key, outcome):
+        finish_stream(self.events, key, outcome)
+
     def cancel(self):
         self.cancel_event.set()
 
@@ -2318,20 +2366,25 @@ class ProjectRunner:
                 for pending in checks:
                     self.events.put(("workflow_started", chapter_index, segment_index, pending))
                 deferred = None  # (result, remaining changes) handed to the explainer
+                stream_key = ("review", chapter_index, segment_index, check)
+                on_stream = self._start_stream(stream_key, {
+                    "scope": "combined" if check is None else "evaluate",
+                    "chapter": chapter_index, "segment": segment_index, "check": check, "checks": list(checks),
+                })
                 try:
                     if check is None:
                         results = run_segment_combined(
                             self.service, self.model, segment.text, options, self.cancel_event,
                             structured=self.structured_output,
                             on_structured_unsupported=self._disable_structured_output,
-                            on_usage=self._report_usage,
+                            on_usage=self._report_usage, on_stream=on_stream,
                         )
                         results = {pending: results[pending] for pending in checks}
                     else:
                         result = evaluate(
                             self.service, self.model, segment.text, check, self.cancel_event,
                             style_guide=options.style_guide, glossary=options.glossary,
-                            on_usage=self._report_usage,
+                            on_usage=self._report_usage, on_stream=on_stream,
                         )
                         if result.status == "done" and self.batches_explanations:
                             remaining = apply_canned_explanations(segment.text, result.changes, options.language)
@@ -2343,6 +2396,7 @@ class ProjectRunner:
                             finish_explanations(result)
                         results = {check: result}
                 except EditCancelled:
+                    self._finish_stream(stream_key, "cancelled")
                     with self._lock:
                         self.running -= 1
                     break
@@ -2351,6 +2405,8 @@ class ProjectRunner:
                         pending: CheckResult(pending, "error", error="Unexpected error: {0!r}".format(exc), model=self.model)
                         for pending in checks
                     }
+                failed = any(result.status == "error" for result in results.values())
+                self._finish_stream(stream_key, "error" if failed else "done")
                 with self._lock:
                     self.running -= 1
                 if deferred is not None:
@@ -2426,16 +2482,24 @@ class ProjectRunner:
                 chunk = group[start:start + EXPLANATION_GROUP_SIZE]
                 numbered = {}
                 if not self.cancel_event.is_set():
+                    with self._lock:
+                        self.explanation_requests += 1
+                        stream_key = ("explain", self.explanation_requests)
+                    on_stream = self._start_stream(stream_key, {
+                        "scope": "explain", "check": check,
+                        "segments": [(chapter, segment) for chapter, segment, _, _, _, _ in chunk],
+                    })
+                    outcome = "done"
                     try:
-                        with self._lock:
-                            self.explanation_requests += 1
                         numbered = request_explanations(
                             self.service, self.model, [(text, remaining) for _, _, _, _, remaining, text in chunk],
                             check, self.cancel_event, options.language, options.style_guide,
-                            on_usage=self._report_usage,
+                            on_usage=self._report_usage, on_stream=on_stream,
                         )
                     except EditCancelled:
                         numbered = {}
+                        outcome = "cancelled"
+                    self._finish_stream(stream_key, outcome)
                 flat = [change for _, _, _, _, remaining, _ in chunk for change in remaining]
                 distribute_explanations(flat, numbered)
                 for entry in chunk:

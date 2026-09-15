@@ -346,7 +346,7 @@ class FakeService:
         if on_usage is not None and self.usage is not None:
             on_usage(UsageRecord(self.usage[0], self.usage[1], 0.5, model))
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None, on_stream=None):
         with self.lock:
             self.calls.append(("edit", instruction[:20], text, text_first))
             self.instructions.append(instruction)
@@ -365,7 +365,7 @@ class FakeService:
             return text.replace("were", "was")
         return "```\n" + text.replace("very very", "extremely") + "\n```"
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None, on_stream=None):
         content = messages[1]["content"]
         self._report(on_usage, model)
         if content.startswith("Review the text below"):
@@ -697,7 +697,7 @@ def test_flags_persist_and_default_to_empty():
 class InventingService(FakeService):
     """Fake backend whose expression check appends a clause the text never had."""
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None, on_stream=None):
         if instruction.startswith("Improve expression"):
             return text.replace("It run fast.", "It run fast, chasing the stranger.")
         return super().stream_edit(model, instruction, text, cancel_event, on_progress, text_first)
@@ -1227,7 +1227,7 @@ def test_language_heuristic_and_setting_mapping():
 class CommaService(FakeService):
     """Grammar check that only inserts a comma (a canned kind); spelling fixes two letters."""
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None, on_stream=None):
         with self.lock:
             self.calls.append(("edit", instruction[:20], text, text_first))
             self.instructions.append(instruction)
@@ -1259,7 +1259,7 @@ def test_explanation_request_is_skipped_when_every_change_is_canned():
 
 def test_explained_is_true_only_when_no_fallback_remains():
     class SilentService(FakeService):
-        def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
+        def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None, on_stream=None):
             self.prompts.append(messages[1]["content"])
             return "{}"  # the model answered nothing useful
 
@@ -1330,7 +1330,7 @@ def test_explainer_batches_by_check_and_distributes_answers(tmp_path):
 class SlowExplainService(FakeService):
     """Explanations take a moment so evaluations pile up and get grouped."""
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None, on_stream=None):
         if not messages[1]["content"].startswith("Review the text below"):
             if cancel_event.wait(0.15):
                 raise EditCancelled("cancelled")
@@ -1374,7 +1374,7 @@ class BlockingExplainService(FakeService):
         super().__init__()
         self.explaining = threading.Event()
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None, on_stream=None):
         if not messages[1]["content"].startswith("Review the text below"):
             self.explaining.set()
             if cancel_event.wait(10):
@@ -1451,6 +1451,90 @@ def test_runner_reports_usage_per_request_and_the_project_sums_it(tmp_path):
     ProjectRunner(combined, service, "m", events, parallelism=1).start()
     collected = drain(events)
     assert len([e for e in collected if e[0] == "workflow_usage"]) == len(service.calls)
+
+
+class ThinkingService(FakeService):
+    """Streams a reasoning piece and the answer to ``on_stream`` like a reasoning model would."""
+
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None,
+                    on_stream=None):
+        result = super().stream_edit(model, instruction, text, cancel_event, on_progress, text_first, on_usage)
+        if on_stream is not None:
+            on_stream("thinking", "plan " + instruction[:8])
+            on_stream("answer", result)
+        return result
+
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None,
+                 on_usage=None, on_stream=None):
+        result = super().generate(model, messages, cancel_event, on_progress, max_tokens, response_format, on_usage)
+        if on_stream is not None:
+            on_stream("thinking", "why")
+            on_stream("answer", result)
+        return result
+
+
+def test_runner_publishes_every_request_as_a_stream_for_the_thinking_view(tmp_path):
+    project = make_project(tmp_path)
+    events = queue.Queue()
+    service = ThinkingService()
+    runner = ProjectRunner(project, service, "m", events, parallelism=2)
+    runner.start()
+    collected = drain(events)
+
+    streams = [event[1:] for event in collected if event[0] == "stream"]
+    started = {key: info for key, kind, info in streams if kind == "started"}
+    finished = {key: outcome for key, kind, outcome in streams if kind == "finished"}
+    # one stream per evaluation task, announced before the task and closed after it
+    tasks = {("review",) + event[1:] for event in collected if event[0] == "workflow_started"}
+    review_keys = {key for key in started if key[0] == "review"}
+    assert review_keys == tasks and all(finished[key] == "done" for key in review_keys)
+    for key in review_keys:
+        _, chapter, segment, check = key
+        assert started[key] == {"scope": "evaluate", "chapter": chapter, "segment": segment, "check": check,
+                                "checks": [check]}
+        order = [kind for k, kind, _ in streams if k == key]
+        assert order[0] == "started" and order[-1] == "finished" and "thinking" in order and "answer" in order
+    pieces = [text for key, kind, text in streams if kind == "thinking" and key[0] == "review"]
+    assert all(text.startswith("plan ") for text in pieces) and len(pieces) == len(review_keys)
+    # the explainer's batched requests are streams of their own, naming the segments they cover
+    explain_keys = sorted(key for key in started if key[0] == "explain")
+    assert explain_keys and explain_keys[0] == ("explain", 1)
+    for key in explain_keys:
+        info = started[key]
+        assert info["scope"] == "explain" and info["check"] in CHECKS and info["segments"]
+        assert all(len(item) == 2 for item in info["segments"])
+        assert finished[key] == "done"
+    assert len(explain_keys) == runner.explanation_requests
+    # every stream ends before the runner does
+    assert collected[-1][0] == "workflow_finished"
+
+    # combined mode: one stream per segment, covering every check
+    combined = make_project(_subdir(tmp_path, "c"), evaluation_mode=EVALUATION_COMBINED)
+    events = queue.Queue()
+    ProjectRunner(combined, ThinkingService(), "m", events, parallelism=1).start()
+    streams = [event[1:] for event in drain(events) if event[0] == "stream"]
+    infos = [info for key, kind, info in streams if kind == "started"]
+    assert infos and all(info["scope"] == "combined" and info["check"] is None and info["checks"] == list(CHECKS)
+                         for info in infos)
+    assert len(infos) == sum(1 for _, segment in combined.all_segments() if not segment.is_blank)
+
+
+def test_runner_marks_failed_and_cancelled_requests_in_their_streams(tmp_path):
+    project = make_project(tmp_path)
+    events = queue.Queue()
+    ProjectRunner(project, FakeService(truncate=True), "m", events, parallelism=1).start()
+    outcomes = {event[1]: event[3] for event in drain(events) if event[0] == "stream" and event[2] == "finished"}
+    assert outcomes and set(outcomes.values()) == {"error"}
+
+    project = make_project(_subdir(tmp_path, "slow"))
+    events = queue.Queue()
+    runner = ProjectRunner(project, FakeService(delay=5), "m", events, parallelism=1)
+    runner.start()
+    time.sleep(0.2)
+    runner.cancel()
+    collected = drain(events)
+    outcomes = [event[3] for event in collected if event[0] == "stream" and event[2] == "finished"]
+    assert outcomes == ["cancelled"]
 
 
 def test_usage_is_optional_in_saved_projects(tmp_path):

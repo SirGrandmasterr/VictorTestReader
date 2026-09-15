@@ -188,7 +188,7 @@ class RecordedService:
             check_name(messages), preview, model, where, RERECORD_HINT
         )
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None, on_stream=None):
         if cancel_event.is_set():
             raise EditCancelled("Editing was cancelled.")
         key = request_key(model, messages, max_tokens)
@@ -204,7 +204,7 @@ class RecordedService:
             on_progress(len(response))
         return response
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None, on_stream=None):
         result = self.generate(
             model, build_messages(instruction, text, text_first), cancel_event, on_progress=on_progress,
             on_usage=on_usage,
@@ -252,12 +252,12 @@ class RecordingService:
             entry["structured"] = True
         return entry
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None, on_stream=None):
         key = request_key(model, messages, max_tokens)
         try:
             response = self.service.generate(
                 model, messages, cancel_event, on_progress=on_progress, max_tokens=max_tokens,
-                response_format=response_format, on_usage=on_usage,
+                response_format=response_format, on_usage=on_usage, on_stream=on_stream,
             )
         except EditCancelled:
             raise
@@ -272,11 +272,11 @@ class RecordingService:
             self.entries[key] = dict(self._entry(model, messages, max_tokens, key, response_format), response=response)
         return response
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None, on_stream=None):
         # Mirror the real backends: build the messages here so the pair is captured.
         result = self.generate(
             model, build_messages(instruction, text, text_first), cancel_event, on_progress=on_progress,
-            on_usage=on_usage,
+            on_usage=on_usage, on_stream=on_stream,
         )
         if not result.strip():
             raise BackendUnavailable("{0} returned an empty response.".format(self.display_name))

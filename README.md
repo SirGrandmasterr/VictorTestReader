@@ -68,6 +68,7 @@ The same review screen with the German interface (`TEAI_LANG=de` or **Connection
 - **Prefix Caching Optimization:** Review prompts place manuscript text before instructions (`text_first=True`) so vLLM and caching-enabled backends maximize KV-cache reuse across checks of the same segment.
 - **Multi-Language UI (i18n):** The complete user interface is available in English and German (`locales/de.json`), following the system language or the choice in the Connection dialog; model prompts stay English and explanation language remains a per-project option.
 - **Accessibility:** Every state is shown as a glyph plus a word, never by colour alone (tree rows, change cards, the chapter view's optional `[+]`/`[~]`/`[−]` markers, the quick review's removed/added labels). The View menu (and `Ctrl+=` / `Ctrl+-` / `Ctrl+0`) scales every font from 80 % to 200 %, and **High contrast** switches to a black-on-white palette with thick borders and a yellow selection; both are remembered. Cards, links and dialogs are reachable with Tab; the selected card carries a visible focus border.
+- **Live Model Thinking:** **View → Model thinking...** (`Ctrl+Shift+T`, also the **Thinking...** button next to *Cancel* and in the review's progress row) opens a window that shows the reasoning a thinking model streams while it works — one entry per request (quick edit steps, every check of every segment, explanation batches, the consistency check), newest first, with its state (waiting / thinking / answering / done / failed / cancelled) and character counts. It works with vLLM's reasoning parser (`reasoning_content`), Ollama's `thinking` field (Ollama 0.9+) and models that write `<think>` blocks inline; the edited text never contains the reasoning. Nothing is written to disk.
 - **Persistent State:** Projects are saved in `<manuscript>.teai/project.json` after every decision, ensuring zero progress loss on application restart.
 
 ---
@@ -200,6 +201,7 @@ Click **Export...** to produce:
 | `Alt+Z` | Review Workflow | Undo the last decision (single or bulk action) |
 | `F2` | Review Workflow | Edit / reword the selected suggestion inline |
 | `Ctrl+E` | Review Workflow | Add custom author correction for selected text |
+| `Ctrl+Shift+T` | Everywhere | Open the *Model thinking* window (live reasoning of the running requests) |
 | `Alt+Left` / `Alt+Right` | Quick Editor / Review | Navigate previous / next suggestion or segment |
 | `Alt+Up` / `Alt+Down` | Review Workflow | Select previous / next change card |
 
@@ -240,6 +242,7 @@ Settings are stored in `TextEnhanceAI-settings.json` (ignored by Git). Environme
   - `review_panel.py`: Sentence and word-group review panel.
   - `workflow_screen.py`: Automatic manuscript review views, cards, tabs, and dialogs.
   - `connection_dialog.py`: Backend and model selection dialog.
+  - `thinking_window.py`: Live view of the reasoning every request streams (`StreamLog` model + window).
   - `theme.py`: Design tokens, colors, custom widgets, and styling.
   - `i18n.py`: Internationalization helper.
 - `locales/`: UI localization dictionaries (`de.json`).
@@ -283,6 +286,7 @@ The test suite runs completely offline using simulated backends and recorded res
   - Added multi-language UI framework (English and German) and a complete German translation.
   - Added an accessibility pass: glyph-plus-word states, chapter-view text markers, font scaling (`Ctrl+=` / `Ctrl+-` / `Ctrl+0`), a high-contrast palette and keyboard-reachable cards.
   - Added opt-in long-run stability tests (`pytest -m slow -q`) for the evaluation runner and the relay path.
+  - Added a live **Model thinking** window (`Ctrl+Shift+T`) that shows the reasoning of every running request as it streams, for the quick editor, the automatic review and the consistency check.
 - **Version 0.13:** Added structured sentence and word-group review, safe mixed decisions, cancellation, connection status, enhanced scratchpads, undo, and automated tests.
 - **Version 0.12:** Added local model selection and background generation.
 - **Version 0.11:** Preserved line breaks after editing.

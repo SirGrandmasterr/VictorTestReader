@@ -29,15 +29,17 @@ class ChainResult:
         return self.steps[-1].output if self.steps else ""
 
 
-def run_chain(service, model, steps, text, cancel_event, on_step=None, on_progress=None, on_usage=None):
+def run_chain(service, model, steps, text, cancel_event, on_step=None, on_progress=None, on_usage=None,
+              on_stream=None):
     """Run editing ``steps`` one after another, each editing the previous step's output.
 
     ``steps`` is a list of ``(name, instruction)`` pairs (plain instruction
     strings work too). ``on_step(index, total, name)`` is called before each
     step (1-based). ``on_usage`` receives the token counts of every step's
-    request. Cancellation is honoured between steps as well as inside a
-    step: ``EditCancelled`` is raised as soon as ``cancel_event`` is set.
-    Returns a ``ChainResult``.
+    request and ``on_stream`` the streamed reasoning and answer text (see
+    ``core.backend``). Cancellation is honoured between steps as well as
+    inside a step: ``EditCancelled`` is raised as soon as ``cancel_event`` is
+    set. Returns a ``ChainResult``.
     """
     result = ChainResult()
     current = text
@@ -49,7 +51,8 @@ def run_chain(service, model, steps, text, cancel_event, on_step=None, on_progre
         if on_step:
             on_step(index, total, name)
         current = service.stream_edit(
-            model, instruction, current, cancel_event, on_progress=on_progress, on_usage=on_usage
+            model, instruction, current, cancel_event, on_progress=on_progress, on_usage=on_usage,
+            on_stream=on_stream,
         )
         result.steps.append(ChainStep(name, instruction, current))
     return result
@@ -97,7 +100,8 @@ def session_hunks(session):
     return result
 
 
-def explain_session(service, model, session, instruction, cancel_event, language=SAME_LANGUAGE, on_usage=None):
+def explain_session(service, model, session, instruction, cancel_event, language=SAME_LANGUAGE, on_usage=None,
+                    on_stream=None):
     """Fill ``ChangeHunk.explanation`` for every change of a quick-editor session.
 
     Trivial changes get the canned sentences the manuscript review uses; the
@@ -111,7 +115,7 @@ def explain_session(service, model, session, instruction, cancel_event, language
     if remaining:
         numbered = request_explanations(
             service, model, [(session.original_text, remaining)], instruction, cancel_event, language,
-            on_usage=on_usage,
+            on_usage=on_usage, on_stream=on_stream,
         )
         distribute_explanations(remaining, numbered)
     return sum(1 for hunk in hunks if hunk.explanation)

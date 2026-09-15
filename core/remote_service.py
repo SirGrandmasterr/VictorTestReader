@@ -18,11 +18,13 @@ from urllib.parse import urlsplit
 
 from .backend import (
     DEFAULT_MAX_TOKENS,
+    STREAM_THINKING,
     TEMPERATURE,
     TOP_P,
     BackendUnavailable,
     EditCancelled,
     OutputTruncated,
+    ThinkingSplitter,
     UsageRecord,
     build_messages,
     strip_thinking,
@@ -411,7 +413,7 @@ class RemoteService:
         return prompt, completion
 
     def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None,
-                 on_usage=None):
+                 on_usage=None, on_stream=None):
         """Stream one chat completion and return its text, honoring cancellation.
 
         ``response_format`` (a JSON schema dict) is sent as an OpenAI-style
@@ -419,7 +421,10 @@ class RemoteService:
         ``StructuredOutputUnsupported`` so callers can stop asking for it.
         ``on_usage`` receives a ``UsageRecord`` when the final chunk carries a
         ``usage`` object (requested through ``stream_options``); that chunk
-        may have no ``choices`` at all.
+        may have no ``choices`` at all. ``on_stream`` receives the reasoning
+        the server's reasoning parser puts in ``delta.reasoning_content``
+        (``delta.reasoning`` on some servers) or that arrives inline as a
+        ``<think>`` block, and the answer text, as they stream.
         """
         self._require_config()
         if cancel_event.is_set():
@@ -434,6 +439,7 @@ class RemoteService:
         received = 0
         finish_reason = None
         usage = None
+        splitter = ThinkingSplitter(on_stream) if on_stream else None
         started = time.time()
         try:
             try:
@@ -465,14 +471,22 @@ class RemoteService:
                         usage = self._parse_usage(event["usage"]) or usage
                     for choice in event.get("choices") or []:
                         delta = choice.get("delta") or {}
+                        if on_stream:
+                            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                            if reasoning:
+                                on_stream(STREAM_THINKING, reasoning)
                         content = delta.get("content")
                         if content:
                             chunks.append(content)
                             received += len(content)
                             if on_progress:
                                 on_progress(received)
+                            if splitter:
+                                splitter.feed(content)
                         if choice.get("finish_reason"):
                             finish_reason = choice["finish_reason"]
+                if splitter:
+                    splitter.flush()
             except (EditCancelled, RemoteUnavailable):
                 raise
             except Exception as exc:
@@ -502,14 +516,14 @@ class RemoteService:
         return strip_thinking("".join(chunks))
 
     def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False,
-                    on_usage=None):
+                    on_usage=None, on_stream=None):
         """Return the edited document, honoring cancellation mid-stream.
 
         ``text_first`` is passed to ``build_messages`` (prefix-cache friendly ordering).
         """
         result = self.generate(
             model, build_messages(instruction, text, text_first), cancel_event, on_progress=on_progress,
-            on_usage=on_usage,
+            on_usage=on_usage, on_stream=on_stream,
         )
         if not result.strip():
             raise RemoteUnavailable("The remote model returned an empty response.")

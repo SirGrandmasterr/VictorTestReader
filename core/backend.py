@@ -19,6 +19,11 @@ where the model runs:
   (also accepted by ``stream_edit``) receives one ``UsageRecord`` per request
   when the server reports token counts; it is called from the worker thread.
   A backend also keeps the last record as ``last_usage``.
+- ``on_stream(kind, text)`` (accepted by both) receives every piece of text
+  as it streams, from the worker thread: ``kind`` is ``STREAM_THINKING`` for
+  the model's reasoning (vLLM ``reasoning_content``, Ollama ``thinking``, or
+  the inside of a leading ``<think>`` block, see ``ThinkingSplitter``) and
+  ``STREAM_ANSWER`` for the answer itself. The UI shows the reasoning live.
 """
 
 import re
@@ -65,6 +70,12 @@ TOP_P = 0.9
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 _OPEN_THINK = re.compile(r"^\s*<think>.*", re.DOTALL)
+THINK_OPEN = "<think>"
+THINK_CLOSE = "</think>"
+
+# Kinds of streamed text handed to ``on_stream(kind, text)``.
+STREAM_THINKING = "thinking"
+STREAM_ANSWER = "answer"
 
 
 def build_messages(instruction, text, text_first=False):
@@ -98,6 +109,81 @@ def strip_thinking(text):
         # Unterminated block: the whole remainder is reasoning, keep nothing.
         cleaned = _OPEN_THINK.sub("", cleaned)
     return cleaned.lstrip("\n")
+
+
+class ThinkingSplitter:
+    """Route streamed answer text to ``on_stream`` as reasoning or answer while it arrives.
+
+    Servers with a reasoning parser deliver the reasoning separately and the
+    backends report it themselves. Without one, a reasoning model puts it
+    inline as a leading ``<think>...</think>`` block: ``feed`` recognises the
+    block while the text streams (a tag split across two chunks is held back
+    until it is complete) so the UI can show it live; ``strip_thinking``
+    removes it from the final text either way. ``flush`` releases whatever is
+    still held back once the stream has ended.
+    """
+
+    def __init__(self, on_stream):
+        self.on_stream = on_stream
+        self._pending = ""
+        self._state = "start"  # start, thinking, answer_start, answer
+
+    def feed(self, text):
+        if not text or self.on_stream is None:
+            return
+        self._pending += text
+        while self._pending:
+            if self._state == "start":
+                stripped = self._pending.lstrip()
+                if not stripped:
+                    return  # nothing but whitespace so far
+                if stripped.startswith(THINK_OPEN):
+                    self._pending = stripped[len(THINK_OPEN):]
+                    self._state = "thinking"
+                    continue
+                if THINK_OPEN.startswith(stripped):
+                    return  # possibly the start of the tag: wait for more
+                self._state = "answer"
+            elif self._state == "thinking":
+                end = self._pending.find(THINK_CLOSE)
+                if end >= 0:
+                    self._emit(STREAM_THINKING, self._pending[:end])
+                    self._pending = self._pending[end + len(THINK_CLOSE):]
+                    self._state = "answer_start"
+                    continue
+                keep = _partial_suffix(self._pending, THINK_CLOSE)
+                self._emit(STREAM_THINKING, self._pending[:len(self._pending) - keep])
+                self._pending = self._pending[len(self._pending) - keep:]
+                return
+            elif self._state == "answer_start":
+                self._pending = self._pending.lstrip()
+                if not self._pending:
+                    return
+                self._state = "answer"
+            else:
+                self._emit(STREAM_ANSWER, self._pending)
+                self._pending = ""
+                return
+
+    def flush(self):
+        """Hand out text held back for a possible tag; the stream is over."""
+        if self._pending and self.on_stream is not None:
+            kind = STREAM_THINKING if self._state == "thinking" else STREAM_ANSWER
+            text = self._pending.lstrip() if self._state in ("start", "answer_start") else self._pending
+            self._emit(kind, text)
+        self._pending = ""
+
+    def _emit(self, kind, text):
+        if text:
+            self.on_stream(kind, text)
+
+
+def _partial_suffix(text, tag):
+    """Length of the longest proper prefix of ``tag`` that ``text`` ends with (0 when none)."""
+    for length in range(min(len(tag) - 1, len(text)), 0, -1):
+        if text.endswith(tag[:length]):
+            return length
+    return 0
 
 
 def truncated_message(model):

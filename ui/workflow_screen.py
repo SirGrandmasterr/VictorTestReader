@@ -55,6 +55,7 @@ from core.workflow import (
     build_outline_messages,
     change_states,
     create_project,
+    finish_stream,
     new_decision_group,
     normalise_style_guide,
     parse_glossary,
@@ -63,6 +64,7 @@ from core.workflow import (
     render_chapter_annotated,
     render_segment,
     resync_project,
+    start_stream,
 )
 from .i18n import N_, format_number, tr
 from .theme import (
@@ -599,11 +601,16 @@ class WorkflowScreen(ttk.Frame):
         cancel = threading.Event()
 
         def worker():
+            stream_key = ("outline",)
+            on_stream = start_stream(self.host.events, stream_key, {"scope": "outline"})
             try:
-                answer = service.generate(model, build_outline_messages(text), cancel, max_tokens=2048)
+                answer = service.generate(model, build_outline_messages(text), cancel, max_tokens=2048,
+                                          on_stream=on_stream)
+                finish_stream(self.host.events, stream_key, "done")
                 starts, titles = parse_outline(answer)
                 self.host.events.put(("workflow_outline", project, text, starts, titles, None))
             except Exception as exc:
+                finish_stream(self.host.events, stream_key, "error")
                 self.host.events.put(("workflow_outline", project, text, [], [], str(exc)))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1141,6 +1148,10 @@ class WorkflowScreen(ttk.Frame):
     def _refresh_decision_dialog(self):
         if self.decision_dialog is not None and self.decision_dialog.winfo_exists():
             self.decision_dialog.refresh()
+
+    def show_thinking(self):
+        """Open the window that shows the model's reasoning for the running requests."""
+        self.host.show_thinking()
 
     def show_statistics(self):
         """Open (or raise and refresh) the statistics window."""
@@ -1765,6 +1776,10 @@ class ProjectView(ttk.Frame):
         self.progress.grid(row=0, column=0, sticky="ew")
         self.progress_var = tk.StringVar(value="")
         ttk.Label(progress_row, textvariable=self.progress_var, style="Muted.TLabel").grid(row=0, column=1, padx=(10, 0))
+        thinking = ttk.Button(progress_row, text=tr("Thinking..."), style="Ghost.TButton",
+                              command=lambda: self.master.show_thinking())
+        thinking.grid(row=0, column=2, padx=(10, 0))
+        Tooltip(thinking, tr("Watch the model's reasoning for every running request (View menu, Ctrl+Shift+T)."))
 
         checks_row = ttk.Frame(progress_row)
         checks_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
