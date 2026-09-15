@@ -30,11 +30,11 @@ STATE_CANCELLED = "cancelled"
 ACTIVE_STATES = (STATE_WAITING, STATE_THINKING, STATE_ANSWERING)
 # glyph plus word for every state, never colour alone (see ui.theme)
 STATE_LABELS = {
-    STATE_WAITING: ("⏳", N_("waiting")),
-    STATE_THINKING: ("▶", N_("thinking")),
-    STATE_ANSWERING: ("▶", N_("answering")),
+    STATE_WAITING: ("◌", N_("waiting")),
+    STATE_THINKING: ("◐", N_("thinking")),
+    STATE_ANSWERING: ("◐", N_("answering")),
     STATE_DONE: ("✓", N_("done")),
-    STATE_ERROR: ("✖", N_("failed")),
+    STATE_ERROR: ("■", N_("failed")),
     STATE_CANCELLED: ("✗", N_("cancelled")),
 }
 OUTCOME_STATES = {"done": STATE_DONE, "error": STATE_ERROR, "cancelled": STATE_CANCELLED}

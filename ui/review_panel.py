@@ -170,10 +170,11 @@ class ReviewPanel(ttk.Frame):
 
     def _style_texts(self):
         """Palette colours and scalable fonts for the text areas (called again after a theme change)."""
-        for widget, size in ((self.context_text, 9), (self.original_text, 11), (self.proposed_text, 11)):
-            style_text(widget, size=size, readonly=True)
-            widget.configure(padx=6, pady=6)
-        self.context_text.configure(background=PALETTE["surface_alt"], highlightthickness=0)
+        style_text(self.context_text, size=10, readonly=True, serif=True)
+        self.context_text.configure(background=PALETTE["surface_alt"], highlightthickness=0, padx=12, pady=6)
+        for widget in (self.original_text, self.proposed_text):
+            style_text(widget, size=12, readonly=True, serif=True)
+            widget.configure(padx=14, pady=10)
         self.original_text.tag_configure(
             "removed", foreground=PALETTE["danger"], background=PALETTE["danger_soft"], overstrike=True
         )

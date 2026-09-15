@@ -41,7 +41,7 @@ def test_select_palette_updates_the_shared_dictionaries_in_place():
     assert theme.STATUS_COLORS is statuses and statuses["error"] == palette["danger"]
     assert theme.select_palette(False) == "normal"
     assert not theme.is_high_contrast()
-    assert palette["text"] == "#1f2937"
+    assert palette["text"] == "#2a2521"
     assert set(statuses) == {STATUS_QUEUED, "running", STATUS_ERROR, STATUS_CLEAN, STATUS_READY, STATUS_REVIEWED}
 
 
@@ -51,8 +51,13 @@ def test_every_status_and_decision_state_has_a_glyph_and_a_word():
         text = status_text(status)
         assert text.startswith(theme.STATUS_GLYPHS[status] + " ")
         assert STATUS_LABELS[status] in text
-    assert theme.STATUS_GLYPHS["flagged"] == "⚠"
-    assert status_text(STATUS_READY, "2 pending") == "● To review · 2 pending"
+    assert theme.STATUS_GLYPHS["flagged"] == "◆"
+    assert status_text(STATUS_READY, "2 pending") == "○ To review · 2 pending"
+    # every status has its own shape, and none of them is a symbol Windows renders as a colour emoji
+    assert len(set(theme.STATUS_GLYPHS.values())) == len(theme.STATUS_GLYPHS)
+    emoji = {"⏳", "⚠", "✔", "✖", "▶"}
+    assert not emoji & set(theme.STATUS_GLYPHS.values())
+    assert not emoji & set(theme.DECISION_GLYPHS.values())
     for state in (STATE_APPLIED, STATE_SUPERSEDED, STATE_REJECTED, STATE_PENDING):
         assert theme.DECISION_GLYPHS[state]
         assert state_text(state) == "{0} {1}".format(theme.DECISION_GLYPHS[state], STATE_LABELS[state])
@@ -66,6 +71,12 @@ def test_quick_review_decisions_get_glyphs_and_hunk_kinds_get_words():
     assert decision_text(PENDING) == "○ Pending"
     assert decision_text("mixed") == "✎ Partially accepted"
     assert HUNK_KIND_LABELS == {"delete": "removed", "insert": "added", "replace": "replaced"}
+
+
+def test_font_roles_put_the_authors_text_and_titles_in_the_serif_face():
+    assert theme.FONT_ROLES["text"][0] > theme.FONT_ROLES["body"][0]
+    assert set(theme.SERIF_ROLES) == {"title", "text"}
+    assert theme.FONT_ROLES["title"][1] == "normal"  # a page title, not a form heading
 
 
 def test_scale_clamping_and_scaled_sizes(monkeypatch):

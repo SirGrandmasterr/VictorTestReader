@@ -141,7 +141,9 @@ def explanation_text(change):
 
 
 def _flagged_note(stats):
-    return tr(" · {flagged} flagged ⚠", flagged=stats["flagged"]) if stats.get("flagged") else ""
+    if not stats.get("flagged"):
+        return ""
+    return tr(" · {flagged} flagged {glyph}", flagged=stats["flagged"], glyph=STATUS_GLYPHS["flagged"])
 
 
 def _suppressed_note(stats):
@@ -1528,7 +1530,8 @@ class ChangeCard(ttk.Frame):
         self.flag_badge = None
         if change.flagged:
             # Hallucination guard: the reason ids explain themselves in the tooltip.
-            self.flag_badge = ttk.Label(top, text="\u26a0 " + tr("check this"), style="Flag.Badge.TLabel")
+            self.flag_badge = ttk.Label(top, text=STATUS_GLYPHS["flagged"] + " " + tr("check this"),
+                                        style="Flag.Badge.TLabel")
             self.flag_badge.pack(side=tk.LEFT, padx=(0, 8))
             Tooltip(self.flag_badge, flag_tooltip(change))
         self.glossary_link = None
@@ -1550,12 +1553,12 @@ class ChangeCard(ttk.Frame):
             Tooltip(self.edit_button, tr("Reword this suggestion before accepting it (F2 on the selected card)."))
 
         self.diff = tk.Text(self, height=2, cursor="arrow")
-        style_text(self.diff, size=10)
+        style_text(self.diff, size=11, serif=True)
         self.diff.configure(padx=6, pady=4, highlightthickness=0, spacing1=0, spacing3=0)
         self.diff.tag_configure("context", foreground=PALETTE["muted"])
         self.diff.tag_configure("removed", foreground=PALETTE["danger"], background=PALETTE["danger_soft"], overstrike=True)
         self.diff.tag_configure("added", foreground=PALETTE["success"], background=PALETTE["success_soft"], underline=True)
-        self.diff.tag_configure("arrow", foreground=PALETTE["faint"])
+        self.diff.tag_configure("arrow", foreground=PALETTE["faint"], font=font(10))  # the serif has no arrow glyph
         self._render_diff(segment_text)
         self.diff.pack(fill=tk.X, pady=(6, 4))
 
@@ -1692,8 +1695,8 @@ class ProjectView(ttk.Frame):
 
     def restyle(self):
         """Re-apply palette colours to the text areas and tree tags after a theme change."""
-        style_text(self.text, size=11, readonly=True)
-        style_text(self.chapter_text, size=11, readonly=True)
+        style_text(self.text, size=12, readonly=True, serif=True)
+        style_text(self.chapter_text, size=12, readonly=True, serif=True)
         self._configure_tags()
         for status, color in STATUS_COLORS.items():
             self.tree.tag_configure(status, foreground=color)
@@ -1861,7 +1864,7 @@ class ProjectView(ttk.Frame):
                                         "on it again. Right-click a row in the tree for one check or a whole chapter."))
 
         self.text = tk.Text(right, height=9)
-        style_text(self.text, size=11, readonly=True)
+        style_text(self.text, size=12, readonly=True, serif=True)
         self.text.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=(4, 6))
         self._configure_tags()  # both text areas exist now
         self.text_menu = tk.Menu(self.text, tearoff=False, postcommand=self._fill_text_menu)
@@ -1883,8 +1886,8 @@ class ProjectView(ttk.Frame):
         self.undo_button = ttk.Button(actions, text=tr("Undo"), style="Small.TButton", command=lambda: self.master.undo())
         self.undo_button.pack(side=tk.RIGHT, padx=(0, 6))
         Tooltip(self.undo_button, tr("Revert the last accept/reject (a bulk action is reverted as a whole). Alt+Z"))
-        self.reject_flagged_button = ttk.Button(actions, text=tr("Reject flagged") + " \u26a0", style="Small.TButton",
-                                                command=self.reject_flagged)
+        self.reject_flagged_button = ttk.Button(actions, text=tr("Reject flagged") + " " + STATUS_GLYPHS["flagged"],
+                                                style="Small.TButton", command=self.reject_flagged)
         self.reject_flagged_button.pack(side=tk.RIGHT, padx=(0, 6))
         self.retry_button = ttk.Button(actions, text=tr("Retry failed"), style="Small.TButton", command=self.on_retry)
 
@@ -1916,7 +1919,7 @@ class ProjectView(ttk.Frame):
         Tooltip(legend, tr("Click a highlighted passage to open its change in the Segment tab; "
                         "Alt+A / Alt+R then decide on it."))
         self.chapter_text = tk.Text(tab, height=20)
-        style_text(self.chapter_text, size=11, readonly=True)
+        style_text(self.chapter_text, size=12, readonly=True, serif=True)
         self.chapter_text.grid(row=2, column=0, sticky="nsew", padx=(10, 0))
         scroll = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=self.chapter_text.yview)
         scroll.grid(row=2, column=1, sticky="ns")
@@ -2269,7 +2272,7 @@ class ProjectView(ttk.Frame):
                 chapter.title, segment.index, check_label(change.check), kind_label(change.kind),
                 "{0} → {1}{2}".format(_one_line(change.original_text) or "∅",
                                           _one_line(change.proposed_text) or "∅",
-                                          "  ⚠" if change.flagged else ""),
+                                          "  " + STATUS_GLYPHS["flagged"] if change.flagged else ""),
             ))
             self.listed[iid] = (chapter.index, segment.index, change.change_id)
         shown = len(self.listed)

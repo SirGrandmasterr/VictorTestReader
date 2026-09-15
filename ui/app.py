@@ -44,7 +44,7 @@ from .connection_dialog import ConnectionDialog
 from .i18n import N_, current_language, format_number, resolve_language, set_language, tr
 from .mode_dialog import ManageModesDialog
 from .review_panel import ReviewPanel
-from .theme import PALETTE, Tooltip, apply_theme, font, style_text, subscribe
+from .theme import Tooltip, apply_theme, font, style_text, subscribe
 from .thinking_window import StreamLog, ThinkingWindow
 from .workflow_screen import WorkflowScreen
 
@@ -53,7 +53,7 @@ COLOR_OK = "ok"
 COLOR_WARN = "warn"
 COLOR_ERROR = "error"
 COLOR_NEUTRAL = "neutral"
-CONNECTION_GLYPHS = {COLOR_OK: "\u25cf", COLOR_WARN: "\u26a0", COLOR_ERROR: "\u2716", COLOR_NEUTRAL: "\u25cb"}
+CONNECTION_GLYPHS = {COLOR_OK: "\u25cf", COLOR_WARN: "\u25c6", COLOR_ERROR: "\u25a0", COLOR_NEUTRAL: "\u25cc"}
 MODE_QUICK = "quick"
 MODE_AUTO = "auto"
 SEPARATOR_CUSTOM = N_("\u2014 Custom modes \u2014")  # unselectable headings in the mode list
@@ -188,9 +188,8 @@ class EditorApp:
         """Re-apply palette colours to the plain Tk widgets after a theme change."""
         if not hasattr(self, "text_area"):
             return
-        style_text(self.text_area, size=11)
+        style_text(self.text_area, size=12, serif=True)
         self.text_area.configure(state=tk.DISABLED if self.generating else tk.NORMAL)
-        self.connection_label.configure(background=PALETTE["header"])
         self._set_connection(*self._connection)
 
     def _build_menu(self):
@@ -277,7 +276,7 @@ class EditorApp:
         dialog.resizable(False, False)
         body = ttk.Frame(dialog, padding=16)
         body.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(body, text="TextEnhanceAI", font=font(14, "bold")).pack(anchor="w")
+        ttk.Label(body, text="TextEnhanceAI", font=font(16, serif=True)).pack(anchor="w")
         ttk.Label(body, text=self.about_text(), justify=tk.LEFT, wraplength=420).pack(anchor="w", pady=(6, 12))
         buttons = ttk.Frame(body)
         buttons.pack(fill=tk.X)
@@ -313,58 +312,37 @@ class EditorApp:
         self._rebuild_recent_menu()
 
     def _build_interface(self):
-        header = ttk.Frame(self.root, style="Header.TFrame", padding=(14, 8))
+        header = ttk.Frame(self.root, style="Header.TFrame", padding=(16, 8))
         header.grid(row=0, column=0, sticky="ew")
         ttk.Label(header, text="TextEnhanceAI", style="Header.TLabel").pack(side=tk.LEFT)
-        ttk.Label(header, text=tr("local & remote LLM editing"), style="HeaderMuted.TLabel").pack(
-            side=tk.LEFT, padx=(8, 18), pady=(3, 0)
-        )
+        # The two workflows as a segmented toggle; the tooltips say what each one is for.
+        segment = ttk.Frame(header, style="Segment.TFrame", padding=2)
+        segment.pack(side=tk.LEFT, padx=(20, 0))
         self.mode_buttons = {}
-        for mode, label in ((MODE_QUICK, tr("Quick edit")), (MODE_AUTO, tr("Automatic review"))):
-            button = ttk.Button(
-                header, text=label, style="Nav.TButton", command=lambda m=mode: self.switch_mode(m)
-            )
-            button.pack(side=tk.LEFT, padx=(0, 4))
+        for mode, label, hint in (
+            (MODE_QUICK, tr("Quick edit"), tr("Fix or rewrite a text in one pass and review the suggestions.")),
+            (MODE_AUTO, tr("Automatic review"),
+             tr("Check a whole manuscript chapter by chapter, decision by decision, and export the result.")),
+        ):
+            button = ttk.Button(segment, text=label, style="Nav.TButton", command=lambda m=mode: self.switch_mode(m))
+            button.pack(side=tk.LEFT)
+            Tooltip(button, hint)
             self.mode_buttons[mode] = button
-        self.connection_var = tk.StringVar(value="{0} {1}".format(CONNECTION_GLYPHS[COLOR_NEUTRAL], tr("Checking...")))
-        self.connection_label = tk.Label(
-            header,
-            textvariable=self.connection_var,
-            anchor="e",
-            font=font(9, "bold"),
-            background=PALETTE["header"],
-            foreground=PALETTE["header_muted"],
-        )
-        self.connection_label.pack(side=tk.RIGHT)
-
-        top_bar = ttk.Frame(self.root, style="Toolbar.TFrame", padding=(12, 6))
-        top_bar.grid(row=1, column=0, sticky="ew")
-        ttk.Label(top_bar, text=tr("Backend"), style="Toolbar.TLabel").pack(side=tk.LEFT)
+        # Backend, model and connection state live in one pill; its menu switches them.
         self.backend_var = tk.StringVar(value="")
-        self.backend_combo = ttk.Combobox(top_bar, textvariable=self.backend_var, state="readonly", width=18)
-        self.backend_combo.pack(side=tk.LEFT, padx=(6, 14))
-        self.backend_combo.bind("<<ComboboxSelected>>", self._on_backend_selected)
-        self._refresh_backend_values()
-
-        ttk.Label(top_bar, text=tr("Model"), style="Toolbar.TLabel").pack(side=tk.LEFT)
         self.model_var = tk.StringVar(value=self.settings.preferred_model())
-        self.model_combo = ttk.Combobox(
-            top_bar,
-            textvariable=self.model_var,
-            state="readonly",
-            width=30,
-            values=(self.model_var.get(),) if self.model_var.get() else (),
-        )
-        self.model_combo.pack(side=tk.LEFT, padx=(6, 6))
-        self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)
-        self.refresh_button = ttk.Button(
-            top_bar, text=tr("Refresh models"), command=self.refresh_models
-        )
-        self.refresh_button.pack(side=tk.LEFT)
-        self.connection_button = ttk.Button(
-            top_bar, text=tr("Connection..."), command=self.open_connection_dialog
-        )
-        self.connection_button.pack(side=tk.LEFT, padx=(6, 0))
+        self._models = [self.model_var.get()] if self.model_var.get() else []
+        self.connection_var = tk.StringVar(value="")
+        self.connection_pill = ttk.Menubutton(header, textvariable=self.connection_var, style="Pill.TMenubutton",
+                                              direction="below")
+        self.connection_menu = tk.Menu(self.connection_pill, tearoff=False, postcommand=self._fill_connection_menu)
+        self.connection_pill.configure(menu=self.connection_menu)
+        self.connection_pill.pack(side=tk.RIGHT)
+        Tooltip(self.connection_pill, tr("Where the model runs and which one answers. Click to switch or to open "
+                                         "the connection settings."))
+        self._refresh_backend_values()
+        self._set_connection(tr("Checking..."), COLOR_NEUTRAL)
+        ttk.Separator(self.root, orient=tk.HORIZONTAL).grid(row=1, column=0, sticky="ew")
 
         self.content = ttk.Frame(self.root)
         self.content.grid(row=2, column=0, sticky="nsew")
@@ -380,7 +358,7 @@ class EditorApp:
         )
         editor_heading.grid(row=0, column=0, sticky="w", pady=(0, 6))
         self.text_area = scrolledtext.ScrolledText(self.editor_frame, undo=True)
-        style_text(self.text_area, size=11)
+        style_text(self.text_area, size=12, serif=True)
         self.text_area.grid(row=1, column=0, sticky="nsew")
         self.text_area.bind("<<Modified>>", self._on_text_modified)
         self.editor_frame.columnconfigure(0, weight=1)
@@ -654,10 +632,7 @@ class EditorApp:
 
     def _update_control_states(self):
         busy = self.generating or self._controls_locked
-        self.model_combo.configure(state="disabled" if busy else "readonly")
-        self.backend_combo.configure(state="disabled" if busy else "readonly")
-        self.refresh_button.configure(state=tk.DISABLED if busy else tk.NORMAL)
-        self.connection_button.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        self.connection_pill.configure(state=tk.DISABLED if busy else tk.NORMAL)
 
     def _on_text_modified(self, event=None):
         if self._suppress_modified:
@@ -791,17 +766,34 @@ class EditorApp:
         )
 
     def _set_connection(self, message, color):
-        """Show the connection state in the header: a glyph and the message, coloured by state."""
+        """Show the connection state in the header pill: glyph, message and model, coloured by state."""
         self._connection = (message, color)
-        self.connection_var.set("{0} {1}".format(CONNECTION_GLYPHS.get(color, ""), message).strip())
-        header_colors = {
-            COLOR_OK: "#7ee2a8",
-            COLOR_WARN: "#ffd27a",
-            COLOR_ERROR: "#ff9b8f",
-        }
-        if PALETTE["header"] == "#000000":  # high contrast: brighter tints on black
-            header_colors = {COLOR_OK: "#9dffc4", COLOR_WARN: "#ffe08a", COLOR_ERROR: "#ffb3a7"}
-        self.connection_label.configure(foreground=header_colors.get(color, PALETTE["header_muted"]))
+        model = self.model_var.get().strip()
+        text = "{0} {1}".format(CONNECTION_GLYPHS.get(color, ""), message).strip()
+        if model and color == COLOR_OK:
+            text = tr("{state} · {model} · {backend}", state=text, model=model, backend=self._backend_label())
+        self.connection_var.set(text + "  ▾")
+        styles = {COLOR_OK: "Ok.Pill.TMenubutton", COLOR_WARN: "Warn.Pill.TMenubutton",
+                  COLOR_ERROR: "Error.Pill.TMenubutton"}
+        self.connection_pill.configure(style=styles.get(color, "Pill.TMenubutton"))
+
+    def _fill_connection_menu(self):
+        """Rebuild the pill's menu: backends, the models of the current one, refresh and settings."""
+        menu = self.connection_menu
+        menu.delete(0, tk.END)
+        menu.add_command(label=tr("Where the model runs"), state=tk.DISABLED)
+        for label, _, _ in self._backend_choices():
+            menu.add_radiobutton(label=label, variable=self.backend_var, value=label, command=self._on_backend_selected)
+        menu.add_separator()
+        menu.add_command(label=tr("Model"), state=tk.DISABLED)
+        if self._models:
+            for model in self._models:
+                menu.add_radiobutton(label=model, variable=self.model_var, value=model, command=self._on_model_selected)
+        else:
+            menu.add_command(label=tr("(no model available)"), state=tk.DISABLED)
+        menu.add_separator()
+        menu.add_command(label=tr("Refresh models"), command=self.refresh_models)
+        menu.add_command(label=tr("Connection settings..."), command=self.open_connection_dialog)
 
     # ------------------------------------------------------- backend switching
     def _save_settings(self):
@@ -823,9 +815,7 @@ class EditorApp:
         return tr(BACKEND_LABELS[BACKEND_OLLAMA])
 
     def _refresh_backend_values(self):
-        """List Local Ollama plus one "Remote: <profile>" entry per relay profile."""
-        labels = [label for label, _, _ in self._backend_choices()]
-        self.backend_combo.configure(values=labels, width=min(32, max(18, max(len(label) for label in labels))))
+        """Select the active backend's label in the pill menu (Local Ollama or "Remote: <profile>")."""
         self.backend_var.set(self._backend_label())
 
     def _on_backend_selected(self, event=None):
@@ -848,7 +838,7 @@ class EditorApp:
         self.service = self.services[backend]
         self.backend_var.set(self._backend_label(backend))
         self.model_var.set(self.settings.preferred_model(backend))
-        self.model_combo.configure(values=(self.model_var.get(),) if self.model_var.get() else ())
+        self._models = [self.model_var.get()] if self.model_var.get() else []
         self._save_settings()
         if backend == BACKEND_REMOTE and not self.settings.remote_configured:
             self._set_connection(tr("Not configured"), COLOR_WARN)
@@ -861,6 +851,7 @@ class EditorApp:
         if model:
             self.settings.remember_model(self.settings.backend, model)
             self._save_settings()
+        self._set_connection(*self._connection)
 
     def open_connection_dialog(self):
         if self.generating or self._controls_locked:
@@ -886,7 +877,6 @@ class EditorApp:
             self._set_connection(tr("Not configured"), COLOR_WARN)
             self.set_status(tr("Choose Connection... to enter the relay address and API key."))
             return
-        self.refresh_button.configure(state=tk.DISABLED)
         self._set_connection(tr("Checking {backend}...", backend=tr(service.display_name)), COLOR_NEUTRAL)
 
         def worker():
@@ -900,10 +890,9 @@ class EditorApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def _handle_models(self, backend, models, summary):
-        self.refresh_button.configure(state=tk.NORMAL)
         if backend != self.settings.backend:
             return  # the user switched backends while this request was running
-        self.model_combo.configure(values=models)
+        self._models = list(models)
         if not models:
             self.model_var.set("")
             self._set_connection(tr("Model missing"), COLOR_WARN)
@@ -921,10 +910,9 @@ class EditorApp:
         )
 
     def _handle_model_error(self, backend, error):
-        self.refresh_button.configure(state=tk.NORMAL)
         if backend != self.settings.backend:
             return
-        self.model_combo.configure(values=())
+        self._models = []
         self._set_connection(tr("Unavailable"), COLOR_ERROR)
         self.set_status(tr("The model list could not be fetched: {error}", error=error))
 

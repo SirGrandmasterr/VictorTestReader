@@ -22,33 +22,37 @@ from tkinter import ttk
 
 from core.settings import UI_SCALE_MAX, UI_SCALE_MIN
 
+# "Paper, ink, clay, moss": warm linen and cream surfaces, charcoal text, one
+# burnt-clay accent and earthy state colours. Every text-on-tint pair keeps
+# at least 4.5:1. The header is light like the rest of the window.
 PALETTES = {
     "normal": {
-        "bg": "#f3f4f7",
-        "surface": "#ffffff",
-        "surface_alt": "#f8f9fb",
-        "border": "#dfe3ea",
-        "text": "#1f2937",
-        "muted": "#6b7280",
-        "faint": "#9ca3af",
-        "accent": "#3b5bdb",
-        "accent_dark": "#2f4ac7",
-        "accent_soft": "#e7ebfb",
-        "header": "#1e2a4a",
-        "header_text": "#f8fafc",
-        "header_muted": "#aab4d0",
-        "header_active": "#3a4a78",
-        "header_hover": "#2a3860",
-        "success": "#15803d",
-        "success_soft": "#dcfce7",
-        "danger": "#b42318",
-        "danger_soft": "#fee4e2",
-        "warning": "#b54708",
-        "warning_soft": "#fef0c7",
-        "info": "#175cd3",
-        "info_soft": "#dbeafe",
-        "selection": "#eef2ff",
-        "focus": "#3b5bdb",
+        "bg": "#f6f1e8",
+        "surface": "#fffdf8",
+        "surface_alt": "#efe8dc",
+        "border": "#e3dacb",
+        "border_strong": "#cfc3b0",
+        "text": "#2a2521",
+        "muted": "#6d655b",
+        "faint": "#a0968a",
+        "accent": "#a84a25",
+        "accent_dark": "#8c3b1a",
+        "accent_soft": "#f6e4d8",
+        "header": "#fffdf8",
+        "header_text": "#2a2521",
+        "header_muted": "#6d655b",
+        "header_active": "#fffdf8",
+        "header_hover": "#efe8dc",
+        "success": "#3d7a4f",
+        "success_soft": "#e4efe3",
+        "danger": "#b4463a",
+        "danger_soft": "#f7e2dd",
+        "warning": "#8f6212",
+        "warning_soft": "#f7ebcf",
+        "info": "#3f6a8c",
+        "info_soft": "#e1eaf1",
+        "selection": "#f3e7d3",
+        "focus": "#a84a25",
     },
     # Black text on white, saturated dark state colours, thick black borders and
     # a yellow selection: readable for low vision and with Windows high contrast.
@@ -57,17 +61,18 @@ PALETTES = {
         "surface": "#ffffff",
         "surface_alt": "#eeeeee",
         "border": "#000000",
+        "border_strong": "#000000",
         "text": "#000000",
         "muted": "#222222",
         "faint": "#444444",
-        "accent": "#0000b8",
-        "accent_dark": "#000080",
-        "accent_soft": "#d9d9ff",
-        "header": "#000000",
-        "header_text": "#ffffff",
-        "header_muted": "#e6e6e6",
-        "header_active": "#0000b8",
-        "header_hover": "#333333",
+        "accent": "#7a2e0e",
+        "accent_dark": "#5a1f06",
+        "accent_soft": "#ffe0cf",
+        "header": "#ffffff",
+        "header_text": "#000000",
+        "header_muted": "#222222",
+        "header_active": "#ffe0cf",
+        "header_hover": "#eeeeee",
         "success": "#005c00",
         "success_soft": "#ccffcc",
         "danger": "#a80000",
@@ -80,12 +85,13 @@ PALETTES = {
         "focus": "#000000",
     },
 }
+# Four inks that stay apart in hue and lightness for the common colour-vision deficiencies.
 CHECK_PALETTES = {
     "normal": {
-        "spelling": ("#6d28d9", "#ede9fe"),
-        "grammar": ("#1d4ed8", "#dbeafe"),
-        "expression": ("#0f766e", "#ccfbf1"),
-        "author": ("#9a3412", "#ffedd5"),  # the author's own corrections (core.workflow.CHECK_AUTHOR)
+        "spelling": ("#7a4c8e", "#efe6f3"),
+        "grammar": ("#3f6a8c", "#e1eaf1"),
+        "expression": ("#2e7566", "#dff0e9"),
+        "author": ("#9a4a1e", "#f8e6d8"),  # the author's own corrections (core.workflow.CHECK_AUTHOR)
     },
     "high_contrast": {
         "spelling": ("#3a0088", "#e6d6ff"),
@@ -100,14 +106,16 @@ STATUS_COLORS = {}
 PALETTE_NAME = "normal"
 
 # Symbols shown next to the state word so nothing depends on colour alone.
+# Geometric shapes only: they come from one text font and take the label's
+# colour, unlike the hourglass or warning sign that Windows draws as colour emoji.
 STATUS_GLYPHS = {
-    "queued": "⏳",  # hourglass
-    "running": "▶",  # play
-    "clean": "✔",  # heavy check
-    "ready": "●",  # dot
-    "reviewed": "✓",  # check
-    "error": "✖",  # heavy cross
-    "flagged": "⚠",  # warning sign
+    "queued": "◌",  # dotted circle
+    "running": "◐",  # half disc
+    "clean": "✓",  # check: nothing to do
+    "ready": "○",  # ring: to review
+    "reviewed": "●",  # filled disc: done
+    "error": "■",  # square
+    "flagged": "◆",  # diamond
 }
 DECISION_GLYPHS = {
     "applied": "✓",
@@ -126,6 +134,7 @@ SPAN_MARKERS = {
 
 _FAMILY = None
 _MONO_FAMILY = None
+_SERIF_FAMILY = None
 _FONTS = {}  # named font -> (tkfont.Font, base size)
 _STANDARD_FONTS = {}  # Tk's own named fonts (TkDefaultFont, ...) -> base size, captured once
 _scale = 1.0
@@ -187,6 +196,19 @@ def mono_family():
     return _MONO_FAMILY
 
 
+def serif_family():
+    """Return a serif family for the author's own text (editor, diff, segments) so a manuscript reads like one."""
+    global _SERIF_FAMILY
+    if _SERIF_FAMILY is None:
+        preferred = ["Georgia", "Constantia", "Cambria", "Palatino Linotype", "Charter", "DejaVu Serif", "Times New Roman"]
+        try:
+            available = set(tkfont.families())
+        except tk.TclError:
+            available = set()
+        _SERIF_FAMILY = next((name for name in preferred if name in available), font_family())
+    return _SERIF_FAMILY
+
+
 def clamp_scale(value):
     try:
         value = float(value)
@@ -204,15 +226,16 @@ def scaled(size):
     return max(6, int(round(size * _scale)))
 
 
-def font(size=10, weight="normal", slant="roman", mono=False):
+def font(size=10, weight="normal", slant="roman", mono=False, serif=False):
     """Return the name of a shared named font of that base size and style.
 
     Named fonts are created once per (size, weight, slant, family) and resized
     together by ``apply_scale``; pass the returned name wherever Tk expects a
     font. Needs a Tk root (the app creates it before any widget).
     """
-    family = mono_family() if mono else font_family()
-    name = "Teai{0}{1}{2}{3}".format("Mono" if mono else "", size, weight.title(), "" if slant == "roman" else slant.title())
+    family = mono_family() if mono else serif_family() if serif else font_family()
+    name = "Teai{0}{1}{2}{3}".format("Mono" if mono else "Serif" if serif else "", size, weight.title(),
+                                     "" if slant == "roman" else slant.title())
     entry = _FONTS.get(name)
     if entry is None:
         options = {"family": family, "size": scaled(size), "weight": weight, "slant": slant}
@@ -232,9 +255,10 @@ FONT_ROLES = {
     "small_bold": (9, "bold", "roman"),
     "small_italic": (9, "normal", "italic"),
     "heading": (11, "bold", "roman"),
-    "title": (15, "bold", "roman"),
-    "text": (11, "normal", "roman"),
+    "title": (16, "normal", "roman"),  # serif, see named_font
+    "text": (12, "normal", "roman"),  # serif: the author's words
 }
+SERIF_ROLES = ("title", "text")
 
 
 def named_font(role):
@@ -242,7 +266,7 @@ def named_font(role):
     if role == "mono":
         return font(10, mono=True)
     size, weight, slant = FONT_ROLES[role]
-    return font(size, weight, slant)
+    return font(size, weight, slant, serif=role in SERIF_ROLES)
 
 
 def apply_scale(factor):
@@ -326,6 +350,7 @@ def apply_theme(root, high_contrast=None, scale=None):
     body_bold = font(10, "bold")
     hc = is_high_contrast()
     border_width = 2 if hc else 1
+    strong = PALETTE["border_strong"]
     root.configure(background=PALETTE["bg"])
     root.option_add("*TCombobox*Listbox.font", base)
     root.option_add("*TCombobox*Listbox.selectBackground", PALETTE["accent"])
@@ -336,19 +361,23 @@ def apply_theme(root, high_contrast=None, scale=None):
                     bordercolor=PALETTE["border"], focuscolor=PALETTE["focus"], focusthickness=2 if hc else 1)
     style.configure("TFrame", background=PALETTE["bg"])
     style.configure("Surface.TFrame", background=PALETTE["surface"])
-    style.configure("Card.TFrame", background=PALETTE["surface"], relief="solid", borderwidth=2,
-                    bordercolor=PALETTE["border"])
+    # A sheet of paper on the desk: a hairline border, no shadow.
+    style.configure("Card.TFrame", background=PALETTE["surface"], relief="solid", borderwidth=border_width,
+                    bordercolor=strong)
     # The selected (keyboard-focused) card: a thick accent border, not only a tinted background.
     style.configure("Selected.Card.TFrame", background=PALETTE["selection"], bordercolor=PALETTE["focus"],
                     borderwidth=2, relief="solid")
     style.configure("Selected.TFrame", background=PALETTE["selection"])
     style.configure("Header.TFrame", background=PALETTE["header"])
     style.configure("Toolbar.TFrame", background=PALETTE["surface"])
+    # The track behind the segmented mode toggle in the header.
+    style.configure("Segment.TFrame", background=PALETTE["surface_alt"], relief="solid", borderwidth=border_width,
+                    bordercolor=PALETTE["border"])
 
     style.configure("TLabel", background=PALETTE["bg"], foreground=PALETTE["text"], font=base)
     style.configure("Surface.TLabel", background=PALETTE["surface"])
     style.configure("Selected.TLabel", background=PALETTE["selection"])
-    style.configure("Title.TLabel", background=PALETTE["bg"], font=font(15, "bold"))
+    style.configure("Title.TLabel", background=PALETTE["bg"], font=named_font("title"))
     style.configure("Heading.TLabel", background=PALETTE["bg"], font=font(11, "bold"))
     style.configure("CardTitle.TLabel", background=PALETTE["surface"], font=font(11, "bold"))
     style.configure("Muted.TLabel", background=PALETTE["bg"], foreground=PALETTE["muted"])
@@ -362,8 +391,9 @@ def apply_theme(root, high_contrast=None, scale=None):
     style.configure("SelectedExplanation.TLabel", background=PALETTE["selection"], foreground=PALETTE["muted"],
                     font=font(9, slant="italic"))
     style.configure("Toolbar.TLabel", background=PALETTE["surface"], foreground=PALETTE["muted"])
+    # The wordmark: a serif name on the light header, no bold.
     style.configure("Header.TLabel", background=PALETTE["header"], foreground=PALETTE["header_text"],
-                    font=font(13, "bold"))
+                    font=font(17, serif=True))
     style.configure("HeaderMuted.TLabel", background=PALETTE["header"], foreground=PALETTE["header_muted"],
                     font=small)
     style.configure("Status.TLabel", background=PALETTE["bg"], foreground=PALETTE["muted"])
@@ -372,7 +402,7 @@ def apply_theme(root, high_contrast=None, scale=None):
                         foreground=color, font=small_bold)
     for check, (fg, bg) in CHECK_COLORS.items():
         style.configure("{0}.Badge.TLabel".format(check.title()), background=bg, foreground=fg,
-                        font=small_bold, padding=(6, 1), relief="solid" if hc else "flat", borderwidth=1,
+                        font=small_bold, padding=(7, 2), relief="solid" if hc else "flat", borderwidth=1,
                         bordercolor=fg)
     for name, fg, bg in (
         ("Applied", PALETTE["success"], PALETTE["success_soft"]),
@@ -382,20 +412,24 @@ def apply_theme(root, high_contrast=None, scale=None):
         ("Mixed", PALETTE["warning"], PALETTE["warning_soft"]),  # quick review: partially accepted
     ):
         style.configure("{0}.State.TLabel".format(name), background=bg, foreground=fg,
-                        font=small_bold, padding=(6, 1), relief="solid" if hc else "flat", borderwidth=1,
+                        font=small_bold, padding=(7, 2), relief="solid" if hc else "flat", borderwidth=1,
                         bordercolor=fg)
         style.configure("{0}.ReviewDecision.TLabel".format(name), background=PALETTE["bg"], foreground=fg,
                         font=body_bold)
-    # Amber badge for changes the hallucination guard flagged.
+    # Ochre badge for changes the hallucination guard flagged.
     style.configure("Flag.Badge.TLabel", background=PALETTE["warning_soft"], foreground=PALETTE["warning"],
-                    font=small_bold, padding=(6, 1), relief="solid" if hc else "flat", borderwidth=1,
+                    font=small_bold, padding=(7, 2), relief="solid" if hc else "flat", borderwidth=1,
                     bordercolor=PALETTE["warning"])
-    # Grey tag naming the kind of edit (punctuation, spelling, ...).
+    # Quiet tag naming the kind of edit (punctuation, spelling, ...).
     style.configure("Kind.Badge.TLabel", background=PALETTE["surface_alt"], foreground=PALETTE["muted"],
-                    font=small, padding=(6, 1))
+                    font=small, padding=(7, 2))
+    # A keyboard shortcut printed next to a button ("Alt+A").
+    style.configure("Kbd.TLabel", background=PALETTE["bg"], foreground=PALETTE["faint"], font=font(9, mono=True))
+    style.configure("Surface.Kbd.TLabel", background=PALETTE["surface"])
+    style.configure("Selected.Kbd.TLabel", background=PALETTE["selection"])
 
-    style.configure("TButton", background=PALETTE["surface"], foreground=PALETTE["text"], padding=(10, 5),
-                    borderwidth=border_width, bordercolor=PALETTE["border"], relief="solid" if hc else "flat",
+    style.configure("TButton", background=PALETTE["surface"], foreground=PALETTE["text"], padding=(11, 6),
+                    borderwidth=border_width, bordercolor=strong, relief="solid" if hc else "flat",
                     font=base)
     style.map("TButton",
               background=[("disabled", PALETTE["surface_alt"]), ("pressed", PALETTE["border"]),
@@ -412,30 +446,53 @@ def apply_theme(root, high_contrast=None, scale=None):
                   bordercolor=[("focus", PALETTE["focus"])])
     style.configure("Success.TButton", foreground=PALETTE["success"], bordercolor=PALETTE["success"])
     style.map("Success.TButton", background=[("active", PALETTE["success_soft"])])
+    # The one filled green button of a screen: the accept action.
+    style.configure("Fill.Success.TButton", background=PALETTE["success"], foreground="#ffffff",
+                    bordercolor=PALETTE["success"], font=body_bold)
+    style.map("Fill.Success.TButton",
+              background=[("disabled", PALETTE["success_soft"]), ("pressed", PALETTE["success"]),
+                          ("active", PALETTE["success"])],
+              foreground=[("disabled", PALETTE["muted"])], bordercolor=[("focus", PALETTE["focus"])])
     style.configure("Danger.TButton", foreground=PALETTE["danger"], bordercolor=PALETTE["danger"])
     style.map("Danger.TButton", background=[("active", PALETTE["danger_soft"])])
     style.configure("Ghost.TButton", background=PALETTE["bg"], bordercolor=PALETTE["border"] if hc else PALETTE["bg"],
                     foreground=PALETTE["muted"])
     style.map("Ghost.TButton", background=[("active", PALETTE["surface"])], foreground=[("active", PALETTE["text"])],
               bordercolor=[("focus", PALETTE["focus"])])
-    style.configure("Nav.TButton", background=PALETTE["header"], foreground=PALETTE["header_muted"],
-                    bordercolor=PALETTE["header"], padding=(12, 5))
+    style.configure("Surface.Ghost.TButton", background=PALETTE["surface"],
+                    bordercolor=PALETTE["border"] if hc else PALETTE["surface"])
+    style.map("Surface.Ghost.TButton", background=[("active", PALETTE["surface_alt"])],
+              foreground=[("active", PALETTE["text"])], bordercolor=[("focus", PALETTE["focus"])])
+    # Segments of the mode toggle: the active one is a raised sheet with the accent word.
+    style.configure("Nav.TButton", background=PALETTE["surface_alt"], foreground=PALETTE["header_muted"],
+                    bordercolor=PALETTE["surface_alt"], padding=(14, 4))
     style.map("Nav.TButton", background=[("active", PALETTE["header_hover"])],
               foreground=[("active", PALETTE["header_text"])],
-              bordercolor=[("focus", PALETTE["header_text"])])
-    style.configure("NavActive.TButton", background=PALETTE["header_active"], foreground=PALETTE["header_text"],
-                    bordercolor=PALETTE["header_active"], padding=(12, 5), font=body_bold)
+              bordercolor=[("focus", PALETTE["focus"])])
+    style.configure("NavActive.TButton", background=PALETTE["header_active"], foreground=PALETTE["accent"],
+                    bordercolor=strong, padding=(14, 4), font=body_bold)
     style.map("NavActive.TButton", background=[("active", PALETTE["header_active"])],
-              bordercolor=[("focus", PALETTE["header_text"])])
-    style.configure("Small.TButton", padding=(6, 2), font=small)
-    style.configure("Small.Success.TButton", padding=(6, 2), font=small, foreground=PALETTE["success"],
+              bordercolor=[("focus", PALETTE["focus"])])
+    style.configure("Small.TButton", padding=(7, 3), font=small)
+    style.configure("Small.Success.TButton", padding=(7, 3), font=small, foreground=PALETTE["success"],
                     bordercolor=PALETTE["success"])
-    style.configure("Small.Danger.TButton", padding=(6, 2), font=small, foreground=PALETTE["danger"],
+    style.configure("Small.Fill.Success.TButton", padding=(7, 3), font=small_bold)
+    style.configure("Small.Danger.TButton", padding=(7, 3), font=small, foreground=PALETTE["danger"],
                     bordercolor=PALETTE["danger"])
+    style.configure("Small.Ghost.TButton", padding=(7, 3), font=small)
     style.configure("Link.TButton", padding=(4, 1), font=small, foreground=PALETTE["accent"],
                     background=PALETTE["surface"], bordercolor=PALETTE["accent"] if hc else PALETTE["surface"])
     style.map("Link.TButton", background=[("active", PALETTE["surface_alt"])],
               bordercolor=[("focus", PALETTE["focus"])])
+    # A pill in the header: the connection state and model, opens the connection menu.
+    style.configure("Pill.TMenubutton", background=PALETTE["surface"], foreground=PALETTE["text"],
+                    bordercolor=strong, borderwidth=border_width, relief="solid" if hc else "flat",
+                    padding=(10, 4), font=small, arrowsize=0)
+    style.map("Pill.TMenubutton", background=[("active", PALETTE["surface_alt"])],
+              bordercolor=[("focus", PALETTE["focus"])])
+    for name, color in (("Ok", PALETTE["success"]), ("Warn", PALETTE["warning"]), ("Error", PALETTE["danger"])):
+        style.configure("{0}.Pill.TMenubutton".format(name), foreground=color, font=small_bold)
+    style.configure("TSeparator", background=PALETTE["border"])
 
     _borrow_native_indicators(style)
     style.configure("TCheckbutton", background=PALETTE["bg"], font=base)
@@ -447,25 +504,26 @@ def apply_theme(root, high_contrast=None, scale=None):
     style.configure("Small.TMenubutton", padding=(6, 2), font=small)
     style.configure("TLabelframe", background=PALETTE["bg"], bordercolor=PALETTE["border"], relief="solid")
     style.configure("TLabelframe.Label", background=PALETTE["bg"], foreground=PALETTE["muted"], font=small_bold)
-    style.configure("TEntry", fieldbackground=PALETTE["surface"], bordercolor=PALETTE["border"], padding=4,
+    style.configure("TEntry", fieldbackground=PALETTE["surface"], bordercolor=strong, padding=5,
                     font=base)
     style.map("TEntry", bordercolor=[("focus", PALETTE["focus"])])
-    style.configure("TSpinbox", fieldbackground=PALETTE["surface"], bordercolor=PALETTE["border"], arrowsize=12,
+    style.configure("TSpinbox", fieldbackground=PALETTE["surface"], bordercolor=strong, arrowsize=12,
                     padding=3)
-    style.configure("TCombobox", fieldbackground=PALETTE["surface"], bordercolor=PALETTE["border"], padding=3,
+    style.configure("TCombobox", fieldbackground=PALETTE["surface"], bordercolor=strong, padding=4,
                     arrowsize=14)
     style.map("TCombobox", fieldbackground=[("readonly", PALETTE["surface"])],
               selectbackground=[("readonly", PALETTE["surface"])],
               selectforeground=[("readonly", PALETTE["text"])],
               bordercolor=[("focus", PALETTE["focus"])])
-    style.configure("Horizontal.TProgressbar", troughcolor=PALETTE["border"], background=PALETTE["accent"],
-                    bordercolor=PALETTE["border"], lightcolor=PALETTE["accent"], darkcolor=PALETTE["accent"])
+    # Progress is moss green: how much of the manuscript is done, not an alert.
+    style.configure("Horizontal.TProgressbar", troughcolor=PALETTE["surface_alt"], background=PALETTE["success"],
+                    bordercolor=PALETTE["border"], lightcolor=PALETTE["success"], darkcolor=PALETTE["success"])
     style.configure("Treeview", background=PALETTE["surface"], fieldbackground=PALETTE["surface"],
-                    foreground=PALETTE["text"], rowheight=scaled(26), bordercolor=PALETTE["border"], font=base)
-    style.map("Treeview", background=[("selected", PALETTE["accent_soft"])],
+                    foreground=PALETTE["text"], rowheight=scaled(27), bordercolor=PALETTE["border"], font=base)
+    style.map("Treeview", background=[("selected", PALETTE["selection"])],
               foreground=[("selected", PALETTE["text"])])
     style.configure("Treeview.Heading", background=PALETTE["surface_alt"], foreground=PALETTE["muted"],
-                    font=small_bold, relief="flat")
+                    font=small_bold, relief="flat", padding=(6, 4))
     style.configure("TPanedwindow", background=PALETTE["bg"])
     style.configure("Sash", sashthickness=6, gripcount=0, background=PALETTE["bg"])
     style.configure("TScrollbar", background=PALETTE["surface_alt"], troughcolor=PALETTE["bg"],
@@ -473,6 +531,7 @@ def apply_theme(root, high_contrast=None, scale=None):
     style.configure("TNotebook", background=PALETTE["bg"], bordercolor=PALETTE["border"])
     style.configure("TNotebook.Tab", padding=(12, 5), background=PALETTE["surface_alt"], font=base)
     style.map("TNotebook.Tab", background=[("selected", PALETTE["surface"])],
+              foreground=[("selected", PALETTE["accent"])],
               bordercolor=[("focus", PALETTE["focus"])])
     _notify()
     return style
@@ -558,10 +617,14 @@ class Tooltip:
             self._window = None
 
 
-def style_text(widget, size=11, background=None, readonly=False, mono=False):
-    """Apply theme colours and the scalable font to a tk.Text widget (call again after a palette change)."""
+def style_text(widget, size=11, background=None, readonly=False, mono=False, serif=False):
+    """Apply theme colours and the scalable font to a tk.Text widget (call again after a palette change).
+
+    ``serif`` marks a widget that holds the author's own words: it gets the
+    serif family and the margins of a page rather than of a form field.
+    """
     widget.configure(
-        font=font(size, mono=mono),
+        font=font(size, mono=mono, serif=serif),
         background=background or PALETTE["surface"],
         foreground=PALETTE["text"],
         insertbackground=PALETTE["accent"],
@@ -569,12 +632,12 @@ def style_text(widget, size=11, background=None, readonly=False, mono=False):
         selectforeground=PALETTE["text"],
         relief=tk.FLAT,
         highlightthickness=2 if is_high_contrast() else 1,
-        highlightbackground=PALETTE["border"],
+        highlightbackground=PALETTE["border_strong"],
         highlightcolor=PALETTE["focus"],
-        padx=10,
-        pady=8,
-        spacing1=1,
-        spacing3=3,
+        padx=scaled(22) if serif else 10,
+        pady=scaled(14) if serif else 8,
+        spacing1=2 if serif else 1,
+        spacing3=6 if serif else 3,
         wrap=tk.WORD,
     )
     if readonly:
