@@ -6,9 +6,13 @@ The application offers two complementary environments:
 1. **Quick Editor:** An interactive desktop editor for refining passages sentence-by-sentence across 11 editing modes with word-level diffing and scratchpad logging.
 2. **Automatic Manuscript Review:** A full-length book and manuscript proofreading workbench that splits entire manuscripts into chapters and segments, runs multi-pass AI evaluations in the background, detects chapter-spanning inconsistencies, generates deep manuscript analytics, and gives the author granular control over every proposed change.
 
-![TextEnhanceAI review screen](https://github.com/wenrolland/TextEnhanceAI/blob/main/TextEnhanceAI-v0.13.png)
+![TextEnhanceAI review screen](TextEnhanceAI-review.png)
 
-The same review screen with the German interface (`TEAI_LANG=de` or **Connection... → Language**):
+The quick editor shows one suggestion at a time as a single paragraph, removed words struck and added words underlined:
+
+![TextEnhanceAI quick edit](TextEnhanceAI-quick-edit.png)
+
+The same review screen with the German interface (`TEAI_LANG=de` or **Edit → Preferences → Language**):
 
 ![TextEnhanceAI review screen in German](TextEnhanceAI-de.png)
 
@@ -24,8 +28,8 @@ The same review screen with the German interface (`TEAI_LANG=de` or **Connection
   - *Three separate requests (more thorough):* Evaluates each check independently across the segment (~3 edit requests per segment). Automatically falls back to separate requests if structured JSON fails or cannot be anchored.
 - **Smart Explanation Pipeline:** Rule-based canned explanations handle trivial changes (punctuation, whitespace, capitalization, 1-letter typos) instantly without extra model calls. Remaining changes are batched across up to 6 segments per prompt to minimize token overhead.
 - **Author's Style Guide:** Standing instructions (e.g., *British spelling*, *keep dialect inside dialogue*, *never touch quotations*) are injected into every check and explanation prompt, taking precedence over default rules.
-- **Protected Glossary & Wildcard Stems:** Protect character names, invented vocabulary, and domain jargon (one per line, with trailing wildcard `*` e.g. `hyper*` to protect all inflections). Proposed changes touching protected terms are automatically suppressed before review. Change cards feature a one-click **Add to glossary** button.
-- **Model-Side Hallucination Guard:** Heuristic detection flags changes that look like invented content (excessive text growth, ungrounded vocabulary not present in the segment, or full rewrites during strict spelling/grammar checks). Flagged changes receive an amber *⚠ check this* warning badge with hover explanations, tree glyph indicators, and a one-click **Reject flagged** button.
+- **Protected Glossary & Wildcard Stems:** Protect character names, invented vocabulary, and domain jargon (one per line, with trailing wildcard `*` e.g. `hyper*` to protect all inflections). Proposed changes touching protected terms are automatically suppressed before review. Every change card has a **Keep “…” as written** link that rejects the change and protects the term from then on.
+- **Model-Side Hallucination Guard:** Heuristic detection flags changes that look like invented content (excessive text growth, ungrounded vocabulary not present in the segment, or full rewrites during strict spelling/grammar checks). Flagged changes receive an ochre *◆ check this* badge with hover explanations, a diamond in the chapter tree, and a one-click **Reject flagged** button.
 - **Multi-Tab Review Experience:**
   - **Segment View:** Highlights proposed changes with check-specific colors; presents card-by-card diffs, kind tags, model explanations, and quick decision buttons.
   - **Chapter Reading View:** Continuous full-chapter reading view with live inline annotations (green underline for applied changes, amber background for pending, strikethrough for rejected, amber wave for flagged). Clicking any marked span jumps straight to its card.
@@ -66,7 +70,7 @@ The same review screen with the German interface (`TEAI_LANG=de` or **Connection
 - **Zero Third-Party Cloud Dependencies:** Run completely offline using local models via Ollama or over an encrypted private tunnel to your own GPU server. No manuscript text is ever logged on intermediate relays.
 - **Remote GPU Support (Relay + vLLM):** Connect to a powerful remote GPU server (e.g. hosting a 27B+ parameter model) through an outbound-only reverse relay—no public ports or inbound firewall holes required.
 - **Prefix Caching Optimization:** Review prompts place manuscript text before instructions (`text_first=True`) so vLLM and caching-enabled backends maximize KV-cache reuse across checks of the same segment.
-- **Multi-Language UI (i18n):** The complete user interface is available in English and German (`locales/de.json`), following the system language or the choice in the Connection dialog; model prompts stay English and explanation language remains a per-project option.
+- **Multi-Language UI (i18n):** The complete user interface is available in English and German (`locales/de.json`), following the system language or the choice under **Edit → Preferences**; model prompts stay English and explanation language remains a per-project option.
 - **Accessibility:** Every state is shown as a glyph plus a word, never by colour alone (tree rows, change cards, the chapter view's optional `[+]`/`[~]`/`[−]` markers, the quick review's removed/added labels). The View menu (and `Ctrl+=` / `Ctrl+-` / `Ctrl+0`) scales every font from 80 % to 200 %, and **High contrast** switches to a black-on-white palette with thick borders and a yellow selection; both are remembered. Cards, links and dialogs are reachable with Tab; the selected card carries a visible focus border.
 - **Live Model Thinking:** **View → Model thinking...** (`Ctrl+Shift+T`, also the **Thinking...** button next to *Cancel* and in the review's progress row) opens a window that shows the reasoning a thinking model streams while it works — one entry per request (quick edit steps, every check of every segment, explanation batches, the consistency check), newest first, with its state (waiting / thinking / answering / done / failed / cancelled) and character counts. It works with vLLM's reasoning parser (`reasoning_content`), Ollama's `thinking` field (Ollama 0.9+) and models that write `<think>` blocks inline; the edited text never contains the reasoning. Nothing is written to disk.
 - **Persistent State:** Projects are saved in `<manuscript>.teai/project.json` after every decision, ensuring zero progress loss on application restart.
@@ -115,21 +119,21 @@ Switch to **Automatic review** in the top header to proofread a full book, paper
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│  [Editor]  [Automatic review]                         Backend: Local (Ollama) ▾  │
+│ TextEnhanceAI  [Quick edit | Automatic review]       ● Connected · llama3.1:8b ▾ │
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│ Project: MyNovel.txt                                [Options...] [Consistency...]│
+│ MyNovel                             [Pause] [More ▾] [Export...] [Close project] │
 ├───────────────────────┬──────────────────────────────────────────────────────────┤
 │ Chapters & Segments   │ [Segment]  [Chapter]  [All changes]  [Consistency]       │
-│ ├─ Chapter 1 (✓)      │ ──────────────────────────────────────────────────────── │
-│ │  ├─ Segment 1 (✓)   │ Text with highlighted changes...                         │
-│ │  └─ Segment 2 (●)   │ ──────────────────────────────────────────────────────── │
-│ └─ Chapter 2 (○)      │ Change Cards: Before / After Diff + Model Explanation    │
-│                       │ [Accept (Alt+A)] [Reject (Alt+R)] [Edit (F2)]            │
+│ ├─ The Causeway  done │ ──────────────────────────────────────────────────────── │
+│ │  ├─ Segment 1 ● done│ Text with highlighted changes...                         │
+│ │  └─ Segment 2 ○ 3   │ ──────────────────────────────────────────────────────── │
+│ └─ Shutters    9 open │ Change cards: diff, reason, Keep as written              │
+│                       │              [Edit… F2]  [Reject Alt+R]  [Accept Alt+A]  │
 └───────────────────────┴──────────────────────────────────────────────────────────┘
 ```
 
 ### 1. Open a Manuscript
-Choose any `.txt` file. The start screen previews chapter detection:
+Choose any `.txt`, `.md`, `.docx` or `.odt` file. The start screen previews chapter detection; splitting, evaluation and the standing instructions sit behind **Advanced options**:
 - Recognizes Markdown headers (`#`, `##`), `Chapter N` / `Kapitel N` headings, numbered titles, ALL-CAPS titles, and scene dividers (`* * *`).
 - Texts lacking headings can be split evenly by size, or you can ask the model to generate a chapter outline based on content.
 
@@ -151,7 +155,7 @@ Press **Start review**. The evaluation runs in the background across configurabl
   - Press `Alt+A` to accept, `Alt+R` to reject, or `F2` to reword inline.
   - Select text and press `Ctrl+E` to add an author correction.
   - Use **Kinds ▾** to filter visible change kinds or bulk accept/reject by kind across the project.
-  - Use **Reject flagged ⚠** to discard suspicious additions caught by the hallucination guard.
+  - Use **Reject flagged ◆** (shown when a segment has flagged changes) to discard suspicious additions caught by the hallucination guard.
 - **Chapter Tab:**
   - Read through the full chapter with color-coded live annotations (green underline = applied, amber background = pending, strikethrough = rejected, amber highlight = flagged).
   - Click any highlighted passage to jump directly to its segment and change card.
@@ -161,14 +165,14 @@ Press **Start review**. The evaluation runs in the background across configurabl
 - **Undo (`Alt+Z`):** Revert any decision—single changes or bulk operations—in a single step. View the complete history via **Decisions...**.
 
 ### 5. Chapter-Spanning Consistency Check
-Once all segments are evaluated, open **Consistency...**:
+Once all segments are evaluated, open **More → Consistency check...**:
 - Scans the manuscript for inconsistent name spellings (`Nyxara`/`Nixara`), hyphenated compounds (`E-Mail`/`Email`), number styles (0–20 digits vs words), quotation marks, and POV/tense shifts.
 - Inspect model-triaged findings in the **Consistency** tab.
 - Click **Apply preferred everywhere** to replace all variants across the entire manuscript with a single click (fully undoable).
 
 ### 6. Analytics & Source Re-sync
-- **Statistics...:** Review per-chapter change densities, acceptance rates, and the 20 most frequent corrections. Click **Copy as Markdown** to export tables.
-- **Check source:** If you edited the source `.txt` file externally, re-sync to preserve existing decisions on unchanged segments and evaluate only updated text. Dropped segment changes are safely preserved in `resync-<timestamp>.md`.
+- **More → Statistics...:** Review per-chapter change densities, acceptance rates, and the 20 most frequent corrections. Click **Copy as Markdown** to export tables.
+- **More → Check the manuscript file...:** If you edited the manuscript file externally, re-sync to preserve existing decisions on unchanged segments and evaluate only updated text. Dropped segment changes are safely preserved in `resync-<timestamp>.md`.
 
 ### 7. Export
 Click **Export...** to produce:
@@ -180,14 +184,14 @@ Click **Export...** to produce:
 
 ## Quick Editor Workflow
 
-1. Paste or type text into the editor.
-2. Select an editing mode (e.g. *Grammar*, *Concise*, *Polish*, *Custom*) and your desired model.
-3. Click **Review changes** or press `Ctrl+Enter`.
-4. Review changes sentence-by-sentence with clear visual diffs:
-   - Accept or reject whole sentences, or expand **Review individual changes** to decide word by word.
-   - Use **Previous** and **Next** (`Alt+Left` / `Alt+Right`) to step through proposals.
-5. Click **Apply review** once all decisions are made.
-6. Use **Undo** if you want to restore the previous editor text.
+1. Paste, type or open a text (an empty editor tells you the three steps).
+2. Pick what the model should do from the mode menu (*Grammar*, *Concise*, *Polish*, your own presets and chains, ...); *Custom* and *Translate* take their instruction in a box right under the menu, with the last five instructions in a menu. Select a passage first to edit only that part.
+3. Click **Suggest edits** or press `Ctrl+Enter`.
+4. Review the suggestions one by one: one paragraph with removed words struck and added words underlined, the model's reasons underneath, and the individual changes as rows you can decide separately (`Alt+Up` / `Alt+Down` select them). The strip of bars in the header shows how far you are; **Side by side** brings back the two-pane view.
+   - Use **Previous** and **Next** (`Alt+Left` / `Alt+Right`) to step through the suggestions, `Alt+A` / `Alt+R` to decide.
+5. Click **Apply N decisions** once every suggestion is decided.
+6. **Undo applied review** and **Redo** (under the mode menu) step back and forth through up to twenty applied reviews; the editor's own `Ctrl+Z` treats each apply as one step.
+7. **Review the whole file...** hands the file to the automatic review.
 
 ---
 
@@ -203,7 +207,9 @@ Click **Export...** to produce:
 | `Ctrl+E` | Review Workflow | Add custom author correction for selected text |
 | `Ctrl+Shift+T` | Everywhere | Open the *Model thinking* window (live reasoning of the running requests) |
 | `Alt+Left` / `Alt+Right` | Quick Editor / Review | Navigate previous / next suggestion or segment |
-| `Alt+Up` / `Alt+Down` | Review Workflow | Select previous / next change card |
+| `Alt+Up` / `Alt+Down` | Quick Editor / Review | Select previous / next individual change / change card |
+| `F1` | Everywhere | Keyboard shortcuts dialog |
+| `Ctrl+,` | Everywhere | Preferences |
 
 ---
 
@@ -215,7 +221,7 @@ For maximum speed and quality, TextEnhanceAI can connect to an external GPU serv
 - **GPU Agent (`remote/gpu-agent`):** Docker Compose stack running [vLLM](https://github.com/vllm-project/vllm) and a lightweight tunneling agent that registers with the relay using an API key.
 - **Zero Text Logging:** Neither the relay nor the agent ever logs prompt text or output content.
 - **Fast Cancellation:** Clicking Cancel in the desktop UI aborts remote generation immediately, freeing GPU compute.
-- **Configuration:** In TextEnhanceAI, select **Connection...**, choose **Remote GPU (relay)**, enter your relay URL and client key, test the connection, and save.
+- **Configuration:** In TextEnhanceAI, open the connection pill in the header and choose **Connection settings...**, pick **Remote GPU (relay)**, enter your relay URL and client key, test the connection, and save.
 
 Complete deployment instructions and wire protocol documentation are in [remote/README.md](remote/README.md) and [remote/PROTOCOL.md](remote/PROTOCOL.md).
 
@@ -241,9 +247,12 @@ Settings are stored in `TextEnhanceAI-settings.json` (ignored by Git). Environme
   - `app.py`: Main application window and Quick Editor screen.
   - `review_panel.py`: Sentence and word-group review panel.
   - `workflow_screen.py`: Automatic manuscript review views, cards, tabs, and dialogs.
-  - `connection_dialog.py`: Backend and model selection dialog.
+  - `connection_dialog.py`: Backend and relay profile dialog.
+  - `preferences_dialog.py`: Language, text size, contrast, quick-edit and review defaults.
+  - `mode_dialog.py`: Custom presets and chains of modes.
+  - `dialogs.py`: Themed name prompt, the keyboard-shortcuts dialog and small helpers.
   - `thinking_window.py`: Live view of the reasoning every request streams (`StreamLog` model + window).
-  - `theme.py`: Design tokens, colors, custom widgets, and styling.
+  - `theme.py`: Palettes (normal and high contrast), the serif/sans/mono fonts, ttk styles, tooltips and toasts.
   - `i18n.py`: Internationalization helper.
 - `locales/`: UI localization dictionaries (`de.json`).
 - `remote/`: Docker Compose stacks for the public relay and GPU agent.
