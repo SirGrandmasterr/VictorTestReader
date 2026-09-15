@@ -3,11 +3,12 @@
 import copy
 import threading
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, ttk
 
 from core.remote_service import RemoteService, normalise_api_key
 from core.secrets import INSTALL_HINT, keyring_available
 from core.settings import BACKEND_LABELS, BACKEND_OLLAMA, BACKEND_REMOTE, UI_LANGUAGES
+from .dialogs import ask_name
 from .i18n import LANGUAGE_LABELS, tr
 from .theme import PALETTE, style_text
 
@@ -232,10 +233,9 @@ class ConnectionDialog(tk.Toplevel):
         self._set_details("")
 
     def _ask_name(self, title, prompt, initial=""):
-        name = simpledialog.askstring(title, prompt, initialvalue=initial, parent=self)
+        name = ask_name(self, title, prompt, initial=initial)
         if name is None:
             return None
-        name = " ".join(name.split())
         if not name:
             messagebox.showerror(title, tr("Enter a name for the profile."), parent=self)
             return None

@@ -52,6 +52,7 @@ UI_SCALE_MIN = 0.8  # font scale (Ctrl+= / Ctrl+-), see ui/theme.py apply_scale
 UI_SCALE_MAX = 2.0
 UI_SCALE_STEP = 0.1
 RECENT_FILES_LIMIT = 10
+INSTRUCTION_HISTORY_LIMIT = 5
 
 _ENV_TRUE = {"1", "true", "yes", "on"}
 
@@ -133,6 +134,8 @@ class AppSettings:
     chains: list = field(default_factory=list)  # [{"name", "steps"}], steps are built-in or custom mode names
     recent_files: list = field(default_factory=list)  # quick-editor files, most recent first
     quick_explanations: bool = False  # ask the model to explain each change in the quick editor (one extra request)
+    instruction_history: list = field(default_factory=list)  # last Custom instructions, most recent first
+    translation_language: str = ""  # last target language of the Translate mode
     use_keyring: bool = False  # keep relay keys in the OS keyring instead of the settings file
     path: Path = field(default=None, repr=False, compare=False)
     load_error: str = field(default="", repr=False, compare=False)
@@ -159,6 +162,8 @@ class AppSettings:
         "chains",
         "recent_files",
         "quick_explanations",
+        "instruction_history",
+        "translation_language",
     )
     # written for the active profile so older versions (one relay) keep working
     _FLAT_REMOTE = ("remote_url", "remote_api_key", "remote_max_tokens", "remote_enable_thinking")
@@ -236,6 +241,11 @@ class AppSettings:
             if entry and entry not in settings.recent_files and Path(entry).is_file():
                 settings.recent_files.append(entry)  # files that vanished are pruned
         settings.recent_files = settings.recent_files[:RECENT_FILES_LIMIT]
+        history = data.get("instruction_history")
+        settings.instruction_history = []
+        for entry in reversed(history if isinstance(history, list) else []):
+            settings.remember_instruction(entry)  # prepends, so the file's first entry ends up first again
+        settings.translation_language = " ".join(str(data.get("translation_language") or "").split())
 
         env_model = environ.get("TEAI_MODEL", "").strip()
         if env_model and not settings.preferred_model(settings.backend):
@@ -522,6 +532,14 @@ class AppSettings:
 
     def forget_file(self, path):
         self.recent_files = [entry for entry in self.recent_files if entry != str(path)]
+
+    def remember_instruction(self, instruction):
+        """Put a Custom instruction at the front of the history (at most INSTRUCTION_HISTORY_LIMIT entries)."""
+        instruction = str(instruction or "").strip()
+        if not instruction:
+            return
+        self.instruction_history = [instruction] + [entry for entry in self.instruction_history if entry != instruction]
+        del self.instruction_history[INSTRUCTION_HISTORY_LIMIT:]
 
     def custom_mode_names(self):
         return [entry["name"] for entry in self.custom_modes]

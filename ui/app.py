@@ -8,7 +8,7 @@ import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from core import RELEASES_URL, __version__
 from core.backend import EditCancelled, OutputTruncated, add_usage, empty_usage, format_usage
@@ -41,6 +41,7 @@ from core.settings import (
 from core.text_positions import char_offset, normalise_span, tk_index
 from core.workflow import CHECK_LABELS, STREAM_EVENT
 from .connection_dialog import ConnectionDialog
+from .dialogs import ask_name
 from .i18n import N_, current_language, format_number, resolve_language, set_language, tr
 from .mode_dialog import ManageModesDialog
 from .review_panel import ReviewPanel
@@ -338,8 +339,9 @@ class EditorApp:
         self.connection_menu = tk.Menu(self.connection_pill, tearoff=False, postcommand=self._fill_connection_menu)
         self.connection_pill.configure(menu=self.connection_menu)
         self.connection_pill.pack(side=tk.RIGHT)
-        Tooltip(self.connection_pill, tr("Where the model runs and which one answers. Click to switch or to open "
-                                         "the connection settings."))
+        self.connection_hint = tr("Where the model runs and which one answers. Click to switch or to open "
+                                  "the connection settings.")
+        self.connection_tooltip = Tooltip(self.connection_pill, self.connection_hint)
         self._refresh_backend_values()
         self._set_connection(tr("Checking..."), COLOR_NEUTRAL)
         ttk.Separator(self.root, orient=tk.HORIZONTAL).grid(row=1, column=0, sticky="ew")
@@ -349,70 +351,88 @@ class EditorApp:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(2, weight=1)
 
-        self.editor_frame = ttk.Frame(self.content, padding=(12, 10, 12, 4))
+        self.editor_frame = ttk.Frame(self.content, padding=(16, 10, 16, 4))
         self.editor_frame.pack(fill=tk.BOTH, expand=True)
-        editor_heading = ttk.Label(
-            self.editor_frame,
-            text=tr("Text to improve"),
-            style="Title.TLabel",
-        )
-        editor_heading.grid(row=0, column=0, sticky="w", pady=(0, 6))
+        heading = ttk.Frame(self.editor_frame)
+        heading.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.document_var = tk.StringVar(value=tr("Untitled"))
+        ttk.Label(heading, textvariable=self.document_var, style="Title.TLabel").pack(side=tk.LEFT)
+        self.document_note_var = tk.StringVar(value=tr("not saved yet"))
+        ttk.Label(heading, textvariable=self.document_note_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(10, 0),
+                                                                                           pady=(6, 0))
+        self.count_var = tk.StringVar(value=tr("{words} words · {count} characters", words=0, count=0))
+        ttk.Label(heading, textvariable=self.count_var, style="Muted.TLabel").pack(side=tk.RIGHT, pady=(6, 0))
         self.text_area = scrolledtext.ScrolledText(self.editor_frame, undo=True)
         style_text(self.text_area, size=12, serif=True)
         self.text_area.grid(row=1, column=0, sticky="nsew")
         self.text_area.bind("<<Modified>>", self._on_text_modified)
+        self.text_area.bind("<<Selection>>", self._on_selection_changed, add="+")
         self.editor_frame.columnconfigure(0, weight=1)
         self.editor_frame.rowconfigure(1, weight=1)
+        self._build_empty_state()
 
-        editor_meta = ttk.Frame(self.editor_frame)
-        editor_meta.grid(row=2, column=0, sticky="ew", pady=(4, 0))
-        self.count_var = tk.StringVar(value=tr("{words} words · {count} characters", words=0, count=0))
-        ttk.Label(editor_meta, textvariable=self.count_var).pack(side=tk.RIGHT)
-
-        controls = ttk.LabelFrame(self.editor_frame, text=tr("Editing request"), padding=7)
-        controls.grid(row=3, column=0, sticky="ew", pady=(7, 0))
-        ttk.Label(controls, text=tr("Editing mode:")).grid(row=0, column=0, sticky="w")
+        # The composer: "Ask the model to [mode]" with the instruction box for Custom/Translate underneath.
+        controls = ttk.Frame(self.editor_frame, style="Card.TFrame", padding=(12, 10))
+        controls.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.controls = controls
+        row = ttk.Frame(controls, style="Surface.TFrame")
+        row.grid(row=0, column=0, sticky="ew")
+        controls.columnconfigure(0, weight=1)
+        ttk.Label(row, text=tr("Ask the model to"), style="SurfaceMuted.TLabel").pack(side=tk.LEFT)
         self.mode_var = tk.StringVar(value=tr(MODE_LABELS["Grammar"]))
         self.mode_combo = ttk.Combobox(
-            controls,
+            row,
             textvariable=self.mode_var,
             state="readonly",
             values=self._mode_values(),
             width=21,
         )
-        self.mode_combo.grid(row=0, column=1, padx=6, sticky="w")
+        self.mode_combo.pack(side=tk.LEFT, padx=(8, 2))
         self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_selected)
+        modes = ttk.Button(row, text=tr("Modes..."), style="Small.Surface.Ghost.TButton", command=self.open_mode_dialog)
+        modes.pack(side=tk.LEFT, padx=(0, 10))
+        Tooltip(modes, tr("Save your own instructions as presets and chain several modes."))
+        self.explain_var = tk.BooleanVar(value=self.settings.quick_explanations)
+        explain = ttk.Checkbutton(
+            row, text=tr("Explain changes"), variable=self.explain_var, command=self._on_explain_toggled,
+            style="Surface.TCheckbutton",
+        )
+        explain.pack(side=tk.LEFT)
+        Tooltip(explain, tr("Ask the model why it changed each passage (one extra request)."))
         self.review_button = ttk.Button(
-            controls,
-            text=tr("Review changes"),
+            row,
+            text=tr("Suggest edits"),
             style="Primary.TButton",
             command=self.start_review,
         )
-        self.review_button.grid(row=0, column=2, padx=(8, 4))
-        self.undo_button = ttk.Button(
-            controls,
-            text=tr("Undo applied review"),
-            command=self.undo_applied_review,
-            state=tk.DISABLED,
-        )
-        self.undo_button.grid(row=0, column=3, padx=4)
-        self.explain_var = tk.BooleanVar(value=self.settings.quick_explanations)
-        ttk.Checkbutton(
-            controls, text=tr("Explain changes"), variable=self.explain_var, command=self._on_explain_toggled
-        ).grid(row=0, column=4, padx=(10, 4), sticky="w")
-        controls.columnconfigure(4, weight=1)
-        self.save_preset_button = ttk.Button(
-            controls, text=tr("Save preset..."), command=self.save_custom_preset
-        )
-        self.save_preset_button.grid(row=0, column=5, padx=4)
-        self.save_preset_button.grid_remove()  # shown once a Custom instruction was entered
-        ttk.Button(controls, text=tr("Modes..."), command=self.open_mode_dialog).grid(row=0, column=6)
+        self.review_button.pack(side=tk.RIGHT)
+        ttk.Label(row, text=tr("Ctrl+Enter"), style="Surface.Kbd.TLabel").pack(side=tk.RIGHT, padx=(0, 8))
+        below = ttk.Frame(controls, style="Surface.TFrame")
+        below.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         self.mode_description_var = tk.StringVar(value=PROMPTS["Grammar"])
-        ttk.Label(
-            controls,
+        self.mode_description = ttk.Label(
+            below,
             textvariable=self.mode_description_var,
-            wraplength=720,
-        ).grid(row=1, column=0, columnspan=7, sticky="w", pady=(5, 0))
+            style="Explanation.TLabel",
+            justify=tk.LEFT,
+        )
+        self.mode_description.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.undo_button = ttk.Button(
+            below,
+            text=tr("Undo applied review"),
+            style="Small.Surface.Ghost.TButton",
+            command=self.undo_applied_review,
+        )
+        self.undo_button.pack(side=tk.RIGHT, padx=(10, 0))
+        self.undo_button.pack_forget()  # shown once a review was applied
+        controls.bind("<Configure>", lambda event: self.mode_description.configure(
+            wraplength=max(240, event.width - 40 - (self.undo_button.winfo_reqwidth() if self.undo_button.winfo_ismapped() else 0))))
+        self._build_instruction_box(controls)
+        self.scope_var = tk.StringVar(value="")
+        self.scope_row = ttk.Frame(controls, style="Surface.TFrame")
+        ttk.Label(self.scope_row, textvariable=self.scope_var, style="Surface.TLabel").pack(side=tk.LEFT)
+        ttk.Button(self.scope_row, text=tr("Edit the whole text instead"), style="Link.TButton",
+                   command=self._clear_selection).pack(side=tk.LEFT, padx=(8, 0))
 
         self.review_panel = ReviewPanel(
             self.content,
@@ -449,6 +469,147 @@ class EditorApp:
         self.progress.pack_forget()
         self.cancel_button.pack_forget()
         self.thinking_button.pack_forget()
+
+    def _build_empty_state(self):
+        """Three lines over the empty editor that say what to do; gone as soon as there is text."""
+        self.empty_state = ttk.Frame(self.text_area, style="Surface.TFrame", padding=(24, 18))
+        for number, line in enumerate((
+            tr("Paste or open a text - a paragraph, an essay, a chapter."),
+            tr("Choose what the model should do with it, below."),
+            tr("Read every suggestion and keep only what you like."),
+        ), 1):
+            step = ttk.Frame(self.empty_state, style="Surface.TFrame")
+            step.pack(anchor="w", pady=(0, 6))
+            ttk.Label(step, text="{0}.".format(number), style="StepNumber.TLabel", width=3).pack(side=tk.LEFT)
+            ttk.Label(step, text=line, style="Step.TLabel").pack(side=tk.LEFT)
+        actions = ttk.Frame(self.empty_state, style="Surface.TFrame")
+        actions.pack(anchor="w", pady=(10, 0))
+        ttk.Button(actions, text=tr("Open a file..."), command=self.open_file).pack(side=tk.LEFT)
+        self.setup_button = ttk.Button(actions, text=tr("Set up a model..."), style="Primary.TButton",
+                                       command=self.open_connection_dialog)
+        self.setup_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.setup_button.pack_forget()
+        self.empty_state.bind("<Button-1>", lambda event: self.text_area.focus_set())
+        self.empty_state.place(relx=0.5, rely=0.42, anchor="center")
+        self._empty_state_shown = True
+
+    def _update_empty_state(self, has_text):
+        """Show the hints only while the editor is empty; offer model setup while none is available."""
+        show = not has_text and not self.generating
+        if show and not self._empty_state_shown:
+            self.empty_state.place(relx=0.5, rely=0.42, anchor="center")
+        elif not show and self._empty_state_shown:
+            self.empty_state.place_forget()
+        self._empty_state_shown = show
+        if self._models:
+            self.setup_button.pack_forget()
+        else:
+            self.setup_button.pack(side=tk.LEFT, padx=(8, 0))
+
+    def _build_instruction_box(self, controls):
+        """The multi-line instruction of the Custom mode (or the target language of Translate), with history."""
+        self.instruction_frame = ttk.Frame(controls, style="Surface.TFrame")
+        self.instruction_frame.columnconfigure(1, weight=1)
+        self.instruction_label_var = tk.StringVar(value=tr("Instruction:"))
+        ttk.Label(self.instruction_frame, textvariable=self.instruction_label_var, style="SurfaceMuted.TLabel").grid(
+            row=0, column=0, sticky="nw", pady=(6, 0))
+        self.instruction_text = tk.Text(self.instruction_frame, height=3, undo=True)
+        style_text(self.instruction_text, size=10)
+        self.instruction_text.grid(row=0, column=1, sticky="ew", padx=(8, 8))
+        self.instruction_text.bind("<Control-Return>", self._primary_shortcut)
+        self.instruction_text.bind("<KeyRelease>", lambda event: self._instruction_changed())
+        side = ttk.Frame(self.instruction_frame, style="Surface.TFrame")
+        side.grid(row=0, column=2, sticky="n")
+        self.history_button = ttk.Menubutton(side, text=tr("Recent instructions") + " ▾", style="Small.TMenubutton")
+        self.history_menu = tk.Menu(self.history_button, tearoff=False, postcommand=self._fill_history_menu)
+        self.history_button.configure(menu=self.history_menu)
+        self.history_button.pack(anchor="e")
+        self.save_preset_button = ttk.Button(side, text=tr("Save as preset..."), style="Link.TButton",
+                                             command=self.save_custom_preset)
+        self.save_preset_button.pack(anchor="e", pady=(4, 0))
+        self._instruction_mode = None  # "Custom", "Translate" or None while the box is hidden
+
+    def _show_instruction_box(self, mode):
+        """Reveal the box for ``mode`` ("Custom" or "Translate") or hide it for any other mode."""
+        if mode == self._instruction_mode:
+            return
+        self._instruction_mode = mode
+        if mode is None:
+            self.instruction_frame.grid_remove()
+            return
+        self.instruction_text.delete("1.0", tk.END)
+        if mode == "Translate":
+            self.instruction_label_var.set(tr("Translate into:"))
+            self.instruction_text.configure(height=1)
+            self.instruction_text.insert("1.0", self.settings.translation_language)
+            self.history_button.pack_forget()
+            self.save_preset_button.pack_forget()
+        else:
+            self.instruction_label_var.set(tr("Instruction:"))
+            self.instruction_text.configure(height=3)
+            self.instruction_text.insert("1.0", self.last_custom_instruction)
+            self.history_button.pack(anchor="e")
+            self.save_preset_button.pack(anchor="e", pady=(4, 0))
+        self.instruction_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self._instruction_changed()
+        self.instruction_text.focus_set()
+
+    def _instruction_value(self):
+        return " ".join(self.instruction_text.get("1.0", "end-1c").split()) if self._instruction_mode else ""
+
+    def _instruction_changed(self):
+        if self._instruction_mode == "Custom":
+            self.save_preset_button.configure(state=tk.NORMAL if self._instruction_value() else tk.DISABLED)
+
+    def _fill_history_menu(self):
+        menu = self.history_menu
+        menu.delete(0, tk.END)
+        if not self.settings.instruction_history:
+            menu.add_command(label=tr("(no instructions used yet)"), state=tk.DISABLED)
+            return
+        for entry in self.settings.instruction_history:
+            label = entry if len(entry) <= 70 else entry[:69] + "…"
+            menu.add_command(label=label, command=lambda text=entry: self._use_history_entry(text))
+
+    def _use_history_entry(self, text):
+        self.instruction_text.delete("1.0", tk.END)
+        self.instruction_text.insert("1.0", text)
+        self._instruction_changed()
+        self.instruction_text.focus_set()
+
+    def _on_selection_changed(self, event=None):
+        """Say so on the button when only the selected passage would be edited (and offer the whole text)."""
+        try:
+            ranges = self.text_area.tag_ranges("sel")
+        except tk.TclError:
+            ranges = ()
+        words = len(re.findall(r"\S+", self.text_area.get(*ranges))) if len(ranges) >= 2 else 0
+        if words:
+            self.review_button.configure(text=tr("Suggest edits for the selection"))
+            self.scope_var.set(tr("Only the selected passage ({count} words) will be edited.", count=format_number(words)))
+            self.scope_row.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        else:
+            self.review_button.configure(text=tr("Suggest edits"))
+            self.scope_row.grid_remove()
+
+    def _clear_selection(self):
+        self.text_area.tag_remove("sel", "1.0", tk.END)
+        self._on_selection_changed()
+        self.text_area.focus_set()
+
+    def _show_undo(self, shown):
+        if shown:
+            self.undo_button.pack(side=tk.RIGHT, padx=(10, 0))
+        else:
+            self.undo_button.pack_forget()
+
+    def _update_document_heading(self):
+        if self.current_path is not None:
+            self.document_var.set(self.current_path.name)
+            self.document_note_var.set(tr("unsaved changes") if self.modified else str(self.current_path.parent))
+        else:
+            self.document_var.set(tr("Untitled"))
+            self.document_note_var.set(tr("unsaved changes") if self.modified else tr("not saved yet"))
 
     def _bind_shortcuts(self):
         self.root.bind_all("<Control-Return>", self._primary_shortcut)
@@ -647,6 +808,7 @@ class EditorApp:
     def _set_modified(self, modified):
         self.modified = bool(modified)
         self.root.title(window_title(self.current_path, self.modified))
+        self._update_document_heading()
 
     def _update_counts(self):
         text = self.text_area.get("1.0", "end-1c")
@@ -654,6 +816,7 @@ class EditorApp:
         self.count_var.set(
             tr("{words} words · {count} characters", words=format_number(words), count=format_number(len(text)))
         )
+        self._update_empty_state(bool(text.strip()))
 
     # ------------------------------------------------------------- modes
     @staticmethod
@@ -703,9 +866,10 @@ class EditorApp:
     def _update_mode_description(self, event=None):
         mode = self._mode_key()
         descriptions = {
-            "Translate": tr("Translate the complete text into a language you choose."),
-            "Custom": tr("Enter a custom editing instruction before generation."),
+            "Translate": tr("Translate the complete text into the language you name below."),
+            "Custom": tr("Tell the model in your own words what to do with the text."),
         }
+        self._show_instruction_box(mode if mode in descriptions else None)
         if mode in descriptions or mode in PROMPTS:
             self.mode_description_var.set(descriptions.get(mode, PROMPTS.get(mode, "")))
             return
@@ -721,12 +885,13 @@ class EditorApp:
         self._save_settings()
 
     def save_custom_preset(self):
-        """Store the last Custom instruction under a name of the user's choice."""
-        instruction = self.last_custom_instruction.strip()
+        """Store the Custom instruction in the box under a name of the user's choice."""
+        instruction = self._instruction_value() if self._instruction_mode == "Custom" else self.last_custom_instruction
         if not instruction:
+            self.set_status(tr("Enter an instruction first."))
             return
-        name = simpledialog.askstring(tr("Save as preset"), tr("Name for this instruction:"), parent=self.root)
-        if not name or not name.strip():
+        name = ask_name(self.root, tr("Save as preset"), tr("Name for this instruction:"), ok_label=tr("Save"))
+        if not name:
             return
         modes, problems = validate_custom_modes(self.settings.custom_modes + [{"name": name, "instruction": instruction}])
         if problems:
@@ -893,10 +1058,12 @@ class EditorApp:
         if backend != self.settings.backend:
             return  # the user switched backends while this request was running
         self._models = list(models)
+        self.connection_tooltip.text = self.connection_hint
         if not models:
             self.model_var.set("")
             self._set_connection(tr("Model missing"), COLOR_WARN)
             self.set_status(self.service.no_models_hint())
+            self._update_counts()
             return
         preferred = self.settings.preferred_model(backend) or self.model_var.get()
         chosen = preferred if preferred in models else models[0]
@@ -908,35 +1075,42 @@ class EditorApp:
             tr("{backend} ready with {count} model(s). Paste text, choose an editing mode, then review suggestions.",
                backend=tr(self.service.display_name).capitalize(), count=len(models))
         )
+        self._update_counts()
 
     def _handle_model_error(self, backend, error):
         if backend != self.settings.backend:
             return
         self._models = []
         self._set_connection(tr("Unavailable"), COLOR_ERROR)
-        self.set_status(tr("The model list could not be fetched: {error}", error=error))
+        self.set_status(tr("{backend} could not be reached. Open the connection menu in the header to check the "
+                           "settings or to switch where the model runs.",
+                           backend=tr(self.service.display_name).capitalize()))
+        self.connection_tooltip.text = tr("The model list could not be fetched: {error}", error=error)
+        self._update_counts()
 
     # -------------------------------------------------------------- generation
     def _get_instruction(self):
-        """Return the ``(name, instruction)`` steps for the chosen mode, or None when the user backed out."""
+        """Return the ``(name, instruction)`` steps for the chosen mode, or None when something is missing."""
         mode = self._mode_key()
         if mode == "Translate":
-            language = simpledialog.askstring(
-                tr("Translate"), tr("Target language:"), parent=self.root
-            )
-            if not language or not language.strip():
+            language = self._instruction_value()
+            if not language:
+                self.set_status(tr("Name the language to translate into first."))
+                self.instruction_text.focus_set()
                 return None
-            return [(mode, build_instruction(mode, language.strip()))]
+            self.settings.translation_language = language
+            self._save_settings()
+            return [(mode, build_instruction(mode, language))]
         if mode == "Custom":
-            custom = simpledialog.askstring(
-                tr("Custom instruction"), tr("Editing instruction:"), parent=self.root,
-                initialvalue=self.last_custom_instruction or None,
-            )
-            if not custom or not custom.strip():
+            custom = self._instruction_value()
+            if not custom:
+                self.set_status(tr("Enter an instruction first."))
+                self.instruction_text.focus_set()
                 return None
-            self.last_custom_instruction = custom.strip()
-            self.save_preset_button.grid()
-            return [(mode, build_instruction(mode, custom.strip()))]
+            self.last_custom_instruction = custom
+            self.settings.remember_instruction(custom)
+            self._save_settings()
+            return [(mode, build_instruction(mode, custom))]
         steps = self.settings.find_chain(mode)
         if steps is not None:
             try:
@@ -1302,7 +1476,7 @@ class EditorApp:
             self._select_span(start, start + len(final_text))
         else:
             self._set_editor_text(final_text)
-        self.undo_button.configure(state=tk.NORMAL)
+        self._show_undo(True)
         self._leave_review(tr("Reviewed changes applied."))
 
     @staticmethod
@@ -1355,7 +1529,7 @@ class EditorApp:
         source = self.last_applied_source
         self.last_applied_source = None
         self._set_editor_text(source)
-        self.undo_button.configure(state=tk.DISABLED)
+        self._show_undo(False)
         self.set_status(tr("The last applied review was undone."))
 
     # ------------------------------------------------------------------- files
@@ -1393,7 +1567,7 @@ class EditorApp:
         self.current_path = Path(path)
         self.current_document = document
         self.last_applied_source = None
-        self.undo_button.configure(state=tk.DISABLED)
+        self._show_undo(False)
         self._set_editor_text(document.text, modified=False)
         self.settings.remember_file(self.current_path)
         self._save_settings()

@@ -233,6 +233,30 @@ def test_quick_explanations_default_off_seeded_by_env_and_persisted(tmp_path):
     assert AppSettings.load(path, environ={"TEAI_QUICK_EXPLAIN": "no"}).quick_explanations is True  # file wins
 
 
+def test_custom_instruction_history_is_capped_deduplicated_and_persisted(tmp_path):
+    from core.settings import INSTRUCTION_HISTORY_LIMIT
+
+    path = tmp_path / "settings.json"
+    settings = AppSettings.load(path, environ={})
+    assert settings.instruction_history == [] and settings.translation_language == ""
+    for number in range(INSTRUCTION_HISTORY_LIMIT + 2):
+        settings.remember_instruction("Instruction {0}".format(number))
+    settings.remember_instruction("  Instruction 3 ")  # moves to the front, whitespace stripped
+    settings.remember_instruction("")  # ignored
+    assert settings.instruction_history[0] == "Instruction 3"
+    assert len(settings.instruction_history) == INSTRUCTION_HISTORY_LIMIT
+    assert "Instruction 0" not in settings.instruction_history
+    settings.translation_language = " Brazilian  Portuguese "
+    settings.save()
+    loaded = AppSettings.load(path, environ={})
+    assert loaded.instruction_history == settings.instruction_history
+    assert loaded.translation_language == "Brazilian Portuguese"
+
+    path.write_text(json.dumps({"instruction_history": ["a", "", "b", "a", 7] + ["x{0}".format(n) for n in range(9)]}),
+                    encoding="utf-8")
+    assert AppSettings.load(path, environ={}).instruction_history == ["a", "b", "7", "x0", "x1"]
+
+
 # ------------------------------------------------------------- profiles
 def test_flat_remote_fields_migrate_to_a_default_profile(tmp_path):
     path = tmp_path / "settings.json"

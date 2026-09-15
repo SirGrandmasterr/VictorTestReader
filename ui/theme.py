@@ -423,8 +423,12 @@ def apply_theme(root, high_contrast=None, scale=None):
     # Quiet tag naming the kind of edit (punctuation, spelling, ...).
     style.configure("Kind.Badge.TLabel", background=PALETTE["surface_alt"], foreground=PALETTE["muted"],
                     font=small, padding=(7, 2))
+    # The numbered hints over an empty editor.
+    style.configure("Step.TLabel", background=PALETTE["surface"], font=named_font("text"))
+    style.configure("StepNumber.TLabel", background=PALETTE["surface"], foreground=PALETTE["accent"],
+                    font=named_font("text"))
     # A keyboard shortcut printed next to a button ("Alt+A").
-    style.configure("Kbd.TLabel", background=PALETTE["bg"], foreground=PALETTE["faint"], font=font(9, mono=True))
+    style.configure("Kbd.TLabel", background=PALETTE["bg"], foreground=PALETTE["faint"], font=small)
     style.configure("Surface.Kbd.TLabel", background=PALETTE["surface"])
     style.configure("Selected.Kbd.TLabel", background=PALETTE["selection"])
 
@@ -480,6 +484,7 @@ def apply_theme(root, high_contrast=None, scale=None):
     style.configure("Small.Danger.TButton", padding=(7, 3), font=small, foreground=PALETTE["danger"],
                     bordercolor=PALETTE["danger"])
     style.configure("Small.Ghost.TButton", padding=(7, 3), font=small)
+    style.configure("Small.Surface.Ghost.TButton", padding=(7, 3), font=small)
     style.configure("Link.TButton", padding=(4, 1), font=small, foreground=PALETTE["accent"],
                     background=PALETTE["surface"], bordercolor=PALETTE["accent"] if hc else PALETTE["surface"])
     style.map("Link.TButton", background=[("active", PALETTE["surface_alt"])],
@@ -630,6 +635,7 @@ def style_text(widget, size=11, background=None, readonly=False, mono=False, ser
         insertbackground=PALETTE["accent"],
         selectbackground=PALETTE["accent_soft"],
         selectforeground=PALETTE["text"],
+        inactiveselectbackground=PALETTE["accent_soft"],  # the selection stays visible while a button has focus
         relief=tk.FLAT,
         highlightthickness=2 if is_high_contrast() else 1,
         highlightbackground=PALETTE["border_strong"],
