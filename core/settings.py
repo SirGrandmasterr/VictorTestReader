@@ -14,8 +14,13 @@ for the active profile so an older app version still finds its settings. A
 file with only the flat fields (or only the environment variables) becomes a
 single profile called "Default".
 
-Note: the relay API keys are stored in plain text in that file. Keep the file
-private, or rely on the ``TEAI_REMOTE_API_KEY`` environment variable instead.
+API keys: with ``use_keyring`` on and the optional ``keyring`` package
+installed, ``save()`` puts every profile's key into the OS keyring (see
+``core.secrets``) and writes the placeholder ``@keyring`` instead; ``load()``
+resolves the placeholder again. Otherwise the keys are stored in plain text
+in the file - keep it private, or rely on the ``TEAI_REMOTE_API_KEY``
+environment variable, which also fills in the active profile's key when the
+file only holds a placeholder (scripted setups without a keyring).
 """
 
 import json
@@ -23,6 +28,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import secrets
 from .prompts import validate_chains, validate_custom_modes
 
 SETTINGS_FILENAME = "TextEnhanceAI-settings.json"
@@ -106,14 +112,22 @@ class AppSettings:
     chains: list = field(default_factory=list)  # [{"name", "steps"}], steps are built-in or custom mode names
     recent_files: list = field(default_factory=list)  # quick-editor files, most recent first
     quick_explanations: bool = False  # ask the model to explain each change in the quick editor (one extra request)
+    use_keyring: bool = False  # keep relay keys in the OS keyring instead of the settings file
     path: Path = field(default=None, repr=False, compare=False)
     load_error: str = field(default="", repr=False, compare=False)
+    # profile name -> key known to be in the keyring (so save() only writes what changed)
+    _stored_keys: dict = field(default_factory=dict, repr=False, compare=False)
+    # profiles whose "@keyring" placeholder could not be resolved (package missing): save() keeps it
+    _unresolved_keys: set = field(default_factory=set, repr=False, compare=False)
+    # profiles whose key came from TEAI_REMOTE_API_KEY instead of the keyring: save() keeps the placeholder
+    _env_keys: set = field(default_factory=set, repr=False, compare=False)
 
     _PERSISTED = (
         "backend",
         "models",
         "remote_profiles",
         "active_profile",
+        "use_keyring",
         "ui_language",
         "default_style_guide",
         "default_glossary",
@@ -152,6 +166,7 @@ class AppSettings:
         backend = data.get("backend") or environ.get("TEAI_BACKEND") or BACKEND_OLLAMA
         settings.backend = backend if backend in BACKENDS else BACKEND_OLLAMA
         settings.remote_profiles, settings.active_profile = cls._load_profiles(data, environ)
+        settings._resolve_keyring(data, environ)
         models = data.get("models")
         settings.models = {
             str(key): str(value)
@@ -225,8 +240,90 @@ class AppSettings:
             active = profiles[0]["name"]
         return profiles, active
 
+    def _resolve_keyring(self, data, environ):
+        """Replace "@keyring" placeholders by the stored keys and decide ``use_keyring``."""
+        placeholders = [p for p in self.remote_profiles if p["api_key"] == secrets.KEYRING_PLACEHOLDER]
+        if "use_keyring" in data:
+            self.use_keyring = bool(data["use_keyring"])
+        else:
+            self.use_keyring = bool(placeholders) or _env_bool(environ.get("TEAI_USE_KEYRING"), False)
+        if not placeholders:
+            return
+        available = secrets.keyring_available()
+        env_key = str(environ.get("TEAI_REMOTE_API_KEY", "") or "").strip()
+        missing = []
+        for profile in placeholders:
+            name = profile["name"]
+            if env_key and name == self.active_profile:
+                profile["api_key"] = env_key  # scripted setups: the environment wins over the keyring
+                self._env_keys.add(name)  # ...but the stored key is left alone
+                continue
+            key = secrets.load_key(name) if available else None
+            if key:
+                profile["api_key"] = key
+                self._stored_keys[name] = key
+            else:
+                profile["api_key"] = ""
+                self._unresolved_keys.add(name)
+                missing.append(name)
+        if missing:
+            if available:
+                note = "No relay key is stored in the system keyring for profile{0} {1}; enter it again.".format(
+                    "" if len(missing) == 1 else "s", ", ".join(missing)
+                )
+            else:
+                note = (
+                    "The relay key of profile{0} {1} is stored in the system keyring, but the keyring package "
+                    "is not installed ({2})."
+                ).format("" if len(missing) == 1 else "s", ", ".join(missing), secrets.INSTALL_HINT)
+            self.load_error = (self.load_error + " " + note).strip()
+
+    @property
+    def keyring_in_use(self):
+        """Whether save() will put the keys into the OS keyring rather than the file."""
+        return self.use_keyring and secrets.keyring_available()
+
+    def _file_view(self):
+        """The persisted dict with keys moved to or removed from the keyring as configured."""
+        data = self.to_dict()
+        profiles = data["remote_profiles"]
+        if self.keyring_in_use:
+            for profile in profiles:
+                name, key = profile["name"], profile["api_key"]
+                if name in self._env_keys:
+                    profile["api_key"] = secrets.KEYRING_PLACEHOLDER  # the environment's key is never stored
+                elif key:
+                    if self._stored_keys.get(name) != key and not secrets.store_key(name, key):
+                        continue  # the store refused: this key stays in the file
+                    self._stored_keys[name] = key
+                    self._unresolved_keys.discard(name)
+                    profile["api_key"] = secrets.KEYRING_PLACEHOLDER
+                elif name in self._unresolved_keys:
+                    profile["api_key"] = secrets.KEYRING_PLACEHOLDER  # never overwrite an unread key
+                elif name in self._stored_keys:
+                    secrets.delete_key(name)
+                    del self._stored_keys[name]
+            for name in list(self._stored_keys):  # renamed or deleted profiles
+                if self.find_profile(name) is None:
+                    secrets.delete_key(name)
+                    del self._stored_keys[name]
+        else:
+            if self._stored_keys and secrets.keyring_available():
+                for name in list(self._stored_keys):  # keyring -> file: drop the other copy
+                    secrets.delete_key(name)
+                self._stored_keys = {}
+            for profile in profiles:
+                if profile["name"] in self._env_keys or (
+                    not profile["api_key"] and profile["name"] in self._unresolved_keys
+                ):
+                    profile["api_key"] = secrets.KEYRING_PLACEHOLDER
+        for profile in profiles:
+            if profile["name"] == self.active_profile:
+                data["remote_api_key"] = profile["api_key"]  # the flat mirror never leaks a keyring key
+        return data
+
     def to_dict(self):
-        """Return only the persisted fields plus the active profile's flat fields."""
+        """Return only the persisted fields plus the active profile's flat fields (keys in clear)."""
         data = {}
         for key in self._PERSISTED:
             value = getattr(self, key)
@@ -242,12 +339,12 @@ class AppSettings:
         return data
 
     def save(self):
-        """Write the settings file; failures are reported, never raised."""
+        """Write the settings file (keys go to the keyring when configured); failures are reported, never raised."""
         if self.path is None:
             return None
         try:
             self.path.write_text(
-                json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n",
+                json.dumps(self._file_view(), indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
         except OSError as exc:

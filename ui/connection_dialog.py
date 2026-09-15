@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
 from core.remote_service import RemoteService, normalise_api_key
+from core.secrets import INSTALL_HINT, keyring_available
 from core.settings import BACKEND_LABELS, BACKEND_OLLAMA, BACKEND_REMOTE, UI_LANGUAGES
 from .i18n import LANGUAGE_LABELS, tr
 
@@ -138,8 +139,24 @@ class ConnectionDialog(tk.Toplevel):
         self._refresh_profile_list()
         self._load_profile(self.draft.active_profile)
 
+        keyring_row = ttk.Frame(self.remote_box)
+        keyring_row.grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.keyring_available = keyring_available()
+        self.keyring_var = tk.BooleanVar(value=bool(self.draft.use_keyring))
+        self.keyring_check = ttk.Checkbutton(
+            keyring_row,
+            text=tr("Store keys in the system keyring (recommended)"),
+            variable=self.keyring_var,
+            command=self._update_storage_note,
+        )
+        self.keyring_check.pack(side=tk.LEFT)
+        if not self.keyring_available:
+            self.keyring_check.configure(state=tk.DISABLED)
+            ttk.Label(keyring_row, text=tr("(not available: {hint})", hint=INSTALL_HINT),
+                      foreground="#555555").pack(side=tk.LEFT, padx=(6, 0))
+
         test_row = ttk.Frame(self.remote_box)
-        test_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        test_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         self.test_button = ttk.Button(test_row, text=tr("Test connection"), command=self.test_connection)
         self.test_button.pack(side=tk.LEFT)
         self.test_status_var = tk.StringVar(value="")
@@ -156,7 +173,7 @@ class ConnectionDialog(tk.Toplevel):
             font=("Segoe UI", 9),
             state=tk.DISABLED,
         )
-        self.details.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.details.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
         preferences = ttk.LabelFrame(body, text=tr("Preferences"), padding=8)
         preferences.pack(fill=tk.X, pady=(10, 0))
@@ -178,15 +195,11 @@ class ConnectionDialog(tk.Toplevel):
             row=1, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
 
-        ttk.Label(
-            body,
-            text=tr(
-                "Settings are saved next to the application in "
-                "TextEnhanceAI-settings.json (the API key is stored in plain text)."
-            ),
-            wraplength=480,
-            foreground="#555555",
-        ).pack(anchor="w", pady=(10, 0))
+        self.storage_note_var = tk.StringVar(value="")
+        ttk.Label(body, textvariable=self.storage_note_var, wraplength=480, foreground="#555555").pack(
+            anchor="w", pady=(10, 0)
+        )
+        self._update_storage_note()
 
         buttons = ttk.Frame(body)
         buttons.pack(fill=tk.X, pady=(12, 0))
@@ -295,6 +308,22 @@ class ConnectionDialog(tk.Toplevel):
     def _toggle_key_visibility(self):
         self.key_entry.configure(show="" if self.show_key_var.get() else "•")
 
+    def _keyring_selected(self):
+        return self.keyring_available and bool(self.keyring_var.get())
+
+    def _update_storage_note(self):
+        """The plain-text warning is shown only while the keys are going to live in the file."""
+        if self._keyring_selected():
+            self.storage_note_var.set(tr(
+                "Settings are saved next to the application in TextEnhanceAI-settings.json; "
+                "the relay API keys are kept in the system keyring."
+            ))
+        else:
+            self.storage_note_var.set(tr(
+                "Settings are saved next to the application in "
+                "TextEnhanceAI-settings.json (the API key is stored in plain text)."
+            ))
+
     def _update_remote_state(self):
         remote = self.backend_var.get() == BACKEND_REMOTE
         state = tk.NORMAL if remote else tk.DISABLED
@@ -308,6 +337,7 @@ class ConnectionDialog(tk.Toplevel):
             self.rename_button,
         ):
             widget.configure(state=state)
+        self.keyring_check.configure(state=state if self.keyring_available else tk.DISABLED)
         self.profile_combo.configure(state="readonly" if remote else tk.DISABLED)
         self.delete_button.configure(
             state=tk.NORMAL if remote and len(self.draft.remote_profiles) > 1 else tk.DISABLED
@@ -403,6 +433,8 @@ class ConnectionDialog(tk.Toplevel):
         self.settings.remote_profiles = [dict(profile) for profile in self.draft.remote_profiles]
         self.settings.active_profile = self.draft.active_profile  # the selected profile becomes active
         self.settings.models = dict(self.draft.models)  # renamed/deleted profiles took their model memory along
+        if self.keyring_available:
+            self.settings.use_keyring = bool(self.keyring_var.get())  # save() migrates the keys either way
         self.destroy()
         self.on_save(self.settings)
 
