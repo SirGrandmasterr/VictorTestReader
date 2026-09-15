@@ -2060,3 +2060,98 @@ def test_source_tracking_reports_missing_files_and_old_projects(tmp_path):
     project.source_path = ""
     assert project.source_changed() is False and project.source_check_reason == "missing"
     assert text_fingerprint("a\r\nb") == text_fingerprint("a\nb")
+
+
+# ------------------------------------------------------- document formats
+def _docx_manuscript(path):
+    docx = pytest.importorskip("docx")
+    document = docx.Document()
+    for block in MANUSCRIPT.strip("\n").split("\n\n"):
+        if block.startswith("Kapitel"):
+            document.add_paragraph(block, style="Heading 1")
+        else:
+            paragraph = document.add_paragraph()
+            paragraph.add_run(block[:3]).bold = True
+            paragraph.add_run(block[3:])
+    document.save(str(path))
+    return path
+
+
+def test_project_created_from_a_docx_exports_the_reviewed_docx(tmp_path):
+    from core.documents import KIND_DOCX, STRUCTURE_WARNING, load_document
+
+    docx = pytest.importorskip("docx")
+    source = _docx_manuscript(tmp_path / "novel.docx")
+    loaded = load_document(source)
+    assert loaded.kind == KIND_DOCX and loaded.text.startswith("# Kapitel 1\n\n")
+    options = ProjectOptions(target_chars=200, max_chars=400, parallelism=2, evaluation_mode=EVALUATION_SEPARATE)
+    project = create_project(source, loaded, options, model="m", backend="fake")
+    assert project.document_kind == KIND_DOCX and project.original_text() == loaded.text
+    assert [c.title for c in project.chapters] == ["Kapitel 1", "Kapitel 2"]
+    assert project.source_changed() is False and project.source_check_reason == "unchanged"
+
+    events = queue.Queue()
+    ProjectRunner(project, FakeService(), "m", events, parallelism=2).start()
+    for event in drain(events):
+        if event[0] == "workflow_result":
+            apply_result(project, *event[1:])
+    project.save()
+    reloaded = Project.load(project.root)
+    assert reloaded.to_dict()["format"] == 2
+    assert reloaded.document == project.document and reloaded.loaded_document().paragraphs == loaded.paragraphs
+    for _, segment in reloaded.all_segments():
+        for change in segment.changes(reloaded.enabled):
+            if change.original_text == "Teh":
+                change.decision = ACCEPTED
+
+    warnings = []
+    paths = reloaded.export(warnings.append)
+    assert warnings == [] and paths["warnings"] == []
+    assert paths["formatted"].name == "novel-reviewed.docx"
+    exported = docx.Document(str(paths["formatted"]))
+    texts = [paragraph.text for paragraph in exported.paragraphs]
+    assert texts[0] == "Kapitel 1" and exported.paragraphs[0].style.name == "Heading 1"
+    assert texts[1].startswith("The dog were")
+    assert len(exported.paragraphs[1].runs) == 1  # the changed paragraph lost its second run
+    assert len(exported.paragraphs[2].runs) == 2  # the untouched filler kept both runs
+    assert load_document(paths["formatted"]).text == reloaded.render_document()
+    assert paths["document"].read_text(encoding="utf-8") == reloaded.render_document()
+
+    # an author's fix that splits a paragraph forces a rebuilt document and a warning
+    segment = reloaded.chapters[1].segments[-1]
+    reloaded.add_author_change(2, segment.index, 0, 0, "Neu.\n\n")
+    paths = reloaded.export()
+    assert STRUCTURE_WARNING in paths["warnings"]
+    assert load_document(paths["formatted"]).text == reloaded.render_document()
+
+
+def test_format_one_projects_load_as_plain_text_documents(tmp_path):
+    from core.documents import KIND_TXT
+
+    project = make_project(tmp_path)
+    data = project.to_dict()
+    del data["document"]
+    data["format"] = 1
+    old = Project.from_dict(data, root=project.root)
+    assert old.document_kind == KIND_TXT and old.loaded_document().paragraphs == []
+    assert old.loaded_document().text == MANUSCRIPT
+    paths = old.export()
+    assert "formatted" not in paths and paths["warnings"] == []
+    with pytest.raises(ValueError):
+        Project.from_dict(dict(data, format=99))
+
+
+def test_resync_from_a_loaded_document_keeps_the_paragraph_locators(tmp_path):
+    from core.documents import KIND_DOCX, load_document
+
+    pytest.importorskip("docx")
+    source = _docx_manuscript(tmp_path / "novel.docx")
+    options = ProjectOptions(target_chars=200, max_chars=400, parallelism=2, evaluation_mode=EVALUATION_SEPARATE)
+    project = create_project(source, load_document(source), options, model="m", backend="fake")
+    project.save()
+    _docx_manuscript(source)  # rewritten identically: still "unchanged"
+    os.utime(str(source), (time.time() + 5, time.time() + 5))
+    assert project.source_changed() is False
+    project.document["paragraphs"] = []
+    resync_project(project, load_document(source))
+    assert project.document_kind == KIND_DOCX and len(project.document["paragraphs"]) == len(load_document(source).paragraphs)

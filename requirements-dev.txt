@@ -1,4 +1,6 @@
 -r requirements.txt
 pytest>=7.0,<8.0
+# Optional at runtime, needed by the .docx tests
+python-docx>=1.1,<2
 # Relay / GPU agent test suites under remote/
 aiohttp>=3.9,<4

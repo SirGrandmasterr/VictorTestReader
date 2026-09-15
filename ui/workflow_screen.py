@@ -8,7 +8,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from core.backend import EditCancelled
 from core.change_kinds import CHANGE_KIND_LABELS, CHANGE_KINDS
-from core.chunking import read_text_file, split_document, word_count
+from core.chunking import split_document, word_count
 from core.consistency import (
     FINDING_LABELS,
     MODEL_TRIAGED,
@@ -22,6 +22,7 @@ from core.consistency import (
     apply_verdicts,
     collect_candidates,
 )
+from core.documents import FORMATTING_NOTE, KIND_LABELS, MANUSCRIPT_PATTERNS, DocumentError, load_document
 from core.models import ACCEPTED, PENDING, REJECTED
 from core.statistics import project_statistics, statistics_markdown
 from core.workflow import (
@@ -453,10 +454,11 @@ class WorkflowScreen(ttk.Frame):
 
     def start_project(self, path, options):
         try:
-            text = read_text_file(path)
-        except OSError as exc:
+            document = load_document(path)
+        except (OSError, DocumentError) as exc:
             messagebox.showerror("Cannot read file", str(exc))
             return
+        text = document.text
         if not text.strip():
             messagebox.showinfo("Empty file", "The selected file contains no text.")
             return
@@ -464,7 +466,7 @@ class WorkflowScreen(ttk.Frame):
         if not model:
             messagebox.showerror("No model", "Select a model in the toolbar before starting a review.")
             return
-        project = create_project(path, text, options, model=model, backend=self.host.backend_id())
+        project = create_project(path, document, options, model=model, backend=self.host.backend_id())
         self.host.remember_style_guide(options.style_guide)
         self.host.remember_glossary(options.glossary)
         self.host.remember_evaluation_mode(options.evaluation_mode)
@@ -570,14 +572,14 @@ class WorkflowScreen(ttk.Frame):
             messagebox.showinfo("Evaluation running", "Pause the evaluation before re-syncing the manuscript.")
             return False
         try:
-            text = read_text_file(self.project.source_path)
-        except OSError as exc:
+            document = load_document(self.project.source_path)
+        except (OSError, DocumentError) as exc:
             messagebox.showerror("Cannot read manuscript", str(exc))
             return False
-        if not text.strip():
+        if not document.text.strip():
             messagebox.showinfo("Empty file", "The manuscript file contains no text; nothing was changed.")
             return False
-        summary = resync_project(self.project, text)
+        summary = resync_project(self.project, document)
         self.running_tasks = set()
         if self.project.consistency:
             self.project.consistency = collect_candidates(self.project, previous=self.project.consistency)
@@ -748,13 +750,18 @@ class WorkflowScreen(ttk.Frame):
         except OSError as exc:
             messagebox.showerror("Export failed", str(exc))
             return
-        self.host.set_status("Exported to {0}".format(paths["document"]))
-        messagebox.showinfo(
-            "Export complete",
-            "Reviewed manuscript:\n{0}\n\nChapter files:\n{1}\n\nReport:\n{2}".format(
-                paths["document"], paths["document"].parent / "reviewed", paths["report"]
-            ),
+        self.host.set_status("Exported to {0}".format(paths.get("formatted") or paths["document"]))
+        message = "Reviewed manuscript:\n{0}\n\nChapter files:\n{1}\n\nReport:\n{2}".format(
+            paths["document"], paths["document"].parent / "reviewed", paths["report"]
         )
+        if paths.get("formatted"):
+            message = "{0} ({1}):\n{2}\n\n{3}\n\n{4}".format(
+                KIND_LABELS.get(self.project.document_kind, "Document"), paths["formatted"].suffix,
+                paths["formatted"], FORMATTING_NOTE, message,
+            )
+        if paths["warnings"]:
+            message += "\n\nLimitations:\n- " + "\n- ".join(paths["warnings"])
+        messagebox.showinfo("Export complete", message)
 
     def close_project(self):
         if self.project is None:
@@ -1028,9 +1035,10 @@ class StartView(ttk.Frame):
         ttk.Label(self, text="Automatic review", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             self,
-            text=("Upload a manuscript as .txt. It is split into chapters and short segments, each segment is "
-                  "checked for spelling, grammar and expression, and every proposed change comes with a short "
-                  "explanation for you to accept or reject."),
+            text=("Choose a manuscript (.txt, .md, .docx or .odt). It is split into chapters and short segments, "
+                  "each segment is checked for spelling, grammar and expression, and every proposed change comes "
+                  "with a short explanation for you to accept or reject. Word and OpenDocument files are written "
+                  "back in their format on export."),
             style="Muted.TLabel", wraplength=760,
         ).pack(anchor="w", pady=(2, 14))
 
@@ -1044,7 +1052,7 @@ class StartView(ttk.Frame):
         manuscript.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         row = ttk.Frame(manuscript, style="Surface.TFrame")
         row.pack(fill=tk.X)
-        ttk.Button(row, text="Choose .txt file...", style="Accent.TButton", command=self.choose_file).pack(side=tk.LEFT)
+        ttk.Button(row, text="Choose manuscript...", style="Accent.TButton", command=self.choose_file).pack(side=tk.LEFT)
         self.path_var = tk.StringVar(value="No file selected")
         ttk.Label(row, textvariable=self.path_var, style="Surface.TLabel").pack(side=tk.LEFT, padx=12)
         self.info_var = tk.StringVar(value="")
@@ -1173,13 +1181,18 @@ class StartView(ttk.Frame):
     # ------------------------------------------------------------ actions
     def choose_file(self):
         path = filedialog.askopenfilename(
-            title="Choose a manuscript", filetypes=[("Text files", "*.txt *.md *.text"), ("All files", "*.*")]
+            title="Choose a manuscript",
+            filetypes=[("Manuscripts", MANUSCRIPT_PATTERNS), ("Text files", "*.txt *.md *.text *.markdown"),
+                       ("Word documents", "*.docx"), ("OpenDocument text", "*.odt"), ("All files", "*.*")],
         )
-        if not path:
-            return
+        if path:
+            self.set_file(path)
+
+    def set_file(self, path):
+        """Select a manuscript (also used by the quick editor's "Send to automatic review")."""
         try:
-            self.text = read_text_file(path)
-        except OSError as exc:
+            self.text = load_document(path).text
+        except (OSError, DocumentError) as exc:
             messagebox.showerror("Cannot read file", str(exc))
             return
         self.path = Path(path)
