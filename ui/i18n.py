@@ -16,6 +16,13 @@ loaded, the string is missing from the table, or the translation's
 placeholders do not match. ``set_language`` is called once at start-up from
 the ``ui_language`` setting; ``scripts/extract_strings.py`` lists source
 strings that still lack a translation.
+
+Constants that are defined once but shown later (label tables) are marked
+with ``N_`` and passed through ``tr`` where they are rendered. English label
+tables that live in ``core/`` (check names, change kinds, ...) stay there;
+``core_source_strings`` lists them so the extraction script and the
+completeness test cover them too. ``format_number`` writes thousands
+separators the way the active language does, without touching ``locale``.
 """
 
 import json
@@ -34,6 +41,50 @@ LANGUAGE_LABELS = {
 LOCALES_DIR = Path(__file__).resolve().parent.parent / "locales"
 
 _active = {"code": DEFAULT_LANGUAGE, "table": {}}
+
+
+THOUSANDS_SEPARATORS = {"en": ",", "de": "."}
+
+
+def N_(text):
+    """Mark a constant for extraction without translating it yet (``tr`` it where it is shown)."""
+    return text
+
+
+def format_number(value):
+    """Format an integer with the active language's thousands separator (no ``locale.setlocale``)."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    text = "{0:,}".format(number)
+    separator = THOUSANDS_SEPARATORS.get(current_language(), ",")
+    return text if separator == "," else text.replace(",", separator)
+
+
+def core_source_strings():
+    """English constants from ``core/`` that the screens show verbatim (translated with ``tr`` at render time)."""
+    from core.change_kinds import CHANGE_KIND_LABELS
+    from core.consistency import FINDING_LABELS, STATUS_LABELS as FINDING_STATUS_LABELS
+    from core.documents import FORMATTING_NOTE, KIND_LABELS
+    from core.ollama_service import OllamaService
+    from core.remote_service import RemoteService
+    from core.settings import BACKEND_LABELS
+    from core.workflow import (
+        AUTHOR_EXPLANATION,
+        CHECK_DESCRIPTIONS,
+        CHECK_LABELS,
+        EVALUATION_LABELS,
+        FALLBACK_EXPLANATIONS,
+        FLAG_LABELS,
+    )
+
+    strings = set()
+    for table in (CHANGE_KIND_LABELS, FINDING_LABELS, FINDING_STATUS_LABELS, KIND_LABELS, BACKEND_LABELS,
+                  CHECK_DESCRIPTIONS, CHECK_LABELS, EVALUATION_LABELS, FALLBACK_EXPLANATIONS, FLAG_LABELS):
+        strings.update(table.values())
+    strings.update((FORMATTING_NOTE, AUTHOR_EXPLANATION, OllamaService.display_name, RemoteService.display_name))
+    return sorted(strings)
 
 
 def tr(text, **kwargs):

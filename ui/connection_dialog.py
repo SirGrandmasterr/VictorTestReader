@@ -68,14 +68,14 @@ class ConnectionDialog(tk.Toplevel):
         self.backend_var = tk.StringVar(value=self.settings.backend)
         ttk.Radiobutton(
             backend_box,
-            text=tr("{backend} — models installed on this computer", backend=BACKEND_LABELS[BACKEND_OLLAMA]),
+            text=tr("{backend} — models installed on this computer", backend=tr(BACKEND_LABELS[BACKEND_OLLAMA])),
             value=BACKEND_OLLAMA,
             variable=self.backend_var,
             command=self._update_remote_state,
         ).pack(anchor="w")
         ttk.Radiobutton(
             backend_box,
-            text=tr("{backend} — a GPU server reached through your relay", backend=BACKEND_LABELS[BACKEND_REMOTE]),
+            text=tr("{backend} — a GPU server reached through your relay", backend=tr(BACKEND_LABELS[BACKEND_REMOTE])),
             value=BACKEND_REMOTE,
             variable=self.backend_var,
             command=self._update_remote_state,
@@ -307,15 +307,14 @@ class ConnectionDialog(tk.Toplevel):
 
     def _update_storage_note(self):
         """The plain-text warning is shown only while the keys are going to live in the file."""
+        path = self.settings.path or "TextEnhanceAI-settings.json"
         if self._keyring_selected():
             self.storage_note_var.set(tr(
-                "Settings are saved next to the application in TextEnhanceAI-settings.json; "
-                "the relay API keys are kept in the system keyring."
+                "Settings are saved in {path}; the relay API keys are kept in the system keyring.", path=path
             ))
         else:
             self.storage_note_var.set(tr(
-                "Settings are saved next to the application in "
-                "TextEnhanceAI-settings.json (the API key is stored in plain text)."
+                "Settings are saved in {path} (the API key is stored in plain text).", path=path
             ))
 
     def _update_remote_state(self):
