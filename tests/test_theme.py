@@ -15,7 +15,7 @@ from core.workflow import (
     STATUS_REVIEWED,
 )
 from ui import theme
-from ui.review_panel import HUNK_KIND_LABELS, decision_text
+from ui.review_panel import HUNK_KIND_LABELS, decision_text, display_text
 from ui.workflow_screen import STATE_LABELS, STATUS_LABELS, mark_spans, state_text, status_text
 
 
@@ -71,6 +71,9 @@ def test_quick_review_decisions_get_glyphs_and_hunk_kinds_get_words():
     assert decision_text(PENDING) == "○ Pending"
     assert decision_text("mixed") == "✎ Partially accepted"
     assert HUNK_KIND_LABELS == {"delete": "removed", "insert": "added", "replace": "replaced"}
+    # a hunk row never shows a bare symbol for "nothing" or a paragraph break
+    assert display_text("") == "(nothing)"
+    assert display_text("one\ntwo") == "one ¶ two"
 
 
 def test_font_roles_put_the_authors_text_and_titles_in_the_serif_face():

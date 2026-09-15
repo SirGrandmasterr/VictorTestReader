@@ -715,11 +715,15 @@ class EditorApp:
     def _up_shortcut(self, event=None):
         if self._in_auto():
             return self.workflow_screen.select_previous_change(event)
+        if self._in_review():
+            return self.review_panel.select_previous_hunk(event)
         return None
 
     def _down_shortcut(self, event=None):
         if self._in_auto():
             return self.workflow_screen.select_next_change(event)
+        if self._in_review():
+            return self.review_panel.select_next_hunk(event)
         return None
 
     # ------------------------------------------------------------- modes
