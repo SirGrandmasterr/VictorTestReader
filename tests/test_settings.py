@@ -6,8 +6,11 @@ from core.settings import (
     BACKEND_OLLAMA,
     BACKEND_REMOTE,
     DEFAULT_OLLAMA_MODEL,
+    DEFAULT_PROFILE_NAME,
     RECENT_FILES_LIMIT,
     AppSettings,
+    make_profile,
+    remote_model_key,
 )
 
 
@@ -193,3 +196,113 @@ def test_quick_explanations_default_off_seeded_by_env_and_persisted(tmp_path):
     settings.save()
     assert json.loads(path.read_text(encoding="utf-8"))["quick_explanations"] is True
     assert AppSettings.load(path, environ={"TEAI_QUICK_EXPLAIN": "no"}).quick_explanations is True  # file wins
+
+
+# ------------------------------------------------------------- profiles
+def test_flat_remote_fields_migrate_to_a_default_profile(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({
+        "backend": "remote", "remote_url": "https://relay.example.com", "remote_api_key": "k1",
+        "remote_max_tokens": 2048, "remote_enable_thinking": True, "models": {"remote": "qwen-27b"},
+    }), encoding="utf-8")
+
+    settings = AppSettings.load(path, environ={"TEAI_REMOTE_URL": "https://ignored.example.com"})
+
+    assert settings.profile_names() == [DEFAULT_PROFILE_NAME]
+    assert settings.active_profile == DEFAULT_PROFILE_NAME
+    assert settings.remote_url == "https://relay.example.com"
+    assert settings.remote_api_key == "k1"
+    assert settings.remote_max_tokens == 2048
+    assert settings.remote_enable_thinking is True
+    assert settings.preferred_model(BACKEND_REMOTE) == "qwen-27b"  # the old single-relay memory still counts
+    assert settings.remote_profiles[0] == make_profile("Default", "https://relay.example.com", "k1", 2048, True)
+
+
+def test_environment_seeds_the_default_profile_only_without_profiles(tmp_path):
+    path = tmp_path / "settings.json"
+    environ = {"TEAI_REMOTE_URL": "https://env.example.com", "TEAI_REMOTE_API_KEY": "env-key"}
+    fresh = AppSettings.load(path, environ=environ)
+    assert fresh.remote_url == "https://env.example.com" and fresh.remote_api_key == "env-key"
+
+    path.write_text(json.dumps({
+        "remote_profiles": [{"name": "Office", "url": "https://office.example.com", "api_key": "o"}],
+        "active_profile": "Office",
+    }), encoding="utf-8")
+    saved = AppSettings.load(path, environ=environ)
+    assert saved.profile_names() == ["Office"]
+    assert saved.remote_url == "https://office.example.com"
+    assert saved.remote_api_key == "o"
+    assert saved.remote_max_tokens == 4096 and saved.remote_enable_thinking is False  # defaults filled in
+
+
+def test_profiles_round_trip_and_the_active_one_is_written_flat(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings.load(path, environ={})
+    settings.remote_url = "https://one.example.com"
+    settings.remote_api_key = "k-one"
+    assert settings.add_profile("Two", url="https://two.example.com", api_key="k-two", max_tokens=8192) is not None
+    assert settings.add_profile("two") is None  # names are unique, case-insensitively
+    assert settings.add_profile("   ") is None
+    assert settings.set_active_profile("Two") is True
+    assert settings.set_active_profile("Nope") is False
+    settings.remember_model(BACKEND_REMOTE, "big-model")
+    settings.set_active_profile(DEFAULT_PROFILE_NAME)
+    settings.remember_model(BACKEND_REMOTE, "small-model")
+    assert settings.save() is None
+
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert [p["name"] for p in stored["remote_profiles"]] == [DEFAULT_PROFILE_NAME, "Two"]
+    assert stored["active_profile"] == DEFAULT_PROFILE_NAME
+    assert stored["remote_url"] == "https://one.example.com"  # flat fields mirror the active profile
+    assert stored["remote_api_key"] == "k-one"
+    assert stored["models"] == {
+        "ollama": DEFAULT_OLLAMA_MODEL, remote_model_key("Two"): "big-model",
+        remote_model_key(DEFAULT_PROFILE_NAME): "small-model",
+    }
+
+    reloaded = AppSettings.load(path, environ={})
+    assert reloaded.remote_profiles == settings.remote_profiles
+    assert reloaded.preferred_model(BACKEND_REMOTE) == "small-model"
+    reloaded.set_active_profile("Two")
+    assert reloaded.remote_url == "https://two.example.com"
+    assert reloaded.remote_max_tokens == 8192
+    assert reloaded.preferred_model(BACKEND_REMOTE) == "big-model"
+    assert reloaded.preferred_model(BACKEND_OLLAMA) == DEFAULT_OLLAMA_MODEL
+
+
+def test_deleting_and_renaming_profiles(tmp_path):
+    settings = AppSettings.load(tmp_path / "settings.json", environ={})
+    assert settings.delete_profile(DEFAULT_PROFILE_NAME) is False  # the last profile stays
+    settings.add_profile("Two", url="https://two.example.com")
+    settings.add_profile("Three")
+    settings.set_active_profile("Two")
+    settings.remember_model(BACKEND_REMOTE, "m2")
+
+    assert settings.rename_profile("Two", "Zwei") is True
+    assert settings.active_profile == "Zwei"
+    assert settings.preferred_model(BACKEND_REMOTE) == "m2"  # model memory follows the rename
+    assert settings.rename_profile("Zwei", "three") is False  # taken
+    assert settings.rename_profile("Zwei", "") is False
+    assert settings.rename_profile("Zwei", "zwei") is True  # only the casing changes
+
+    assert settings.delete_profile("zwei") is True  # deleting the active profile
+    assert settings.active_profile == DEFAULT_PROFILE_NAME  # ...falls back to the first
+    assert settings.profile_names() == [DEFAULT_PROFILE_NAME, "Three"]
+    assert remote_model_key("zwei") not in settings.models
+    assert settings.delete_profile("Missing") is False
+
+
+def test_damaged_profile_entries_are_dropped(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({
+        "remote_profiles": [5, {"url": "no name"}, {"name": "A", "url": "https://a"}, {"name": "a", "url": "dup"}],
+        "active_profile": "Missing",
+    }), encoding="utf-8")
+    settings = AppSettings.load(path, environ={})
+    assert settings.profile_names() == ["A"]
+    assert settings.active_profile == "A"
+
+    path.write_text(json.dumps({"remote_profiles": "nonsense"}), encoding="utf-8")
+    settings = AppSettings.load(path, environ={})
+    assert settings.profile_names() == [DEFAULT_PROFILE_NAME]
+    assert settings.remote_configured is False

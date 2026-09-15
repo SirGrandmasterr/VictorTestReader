@@ -206,16 +206,11 @@ class EditorApp:
         top_bar = ttk.Frame(self.root, style="Toolbar.TFrame", padding=(12, 6))
         top_bar.grid(row=1, column=0, sticky="ew")
         ttk.Label(top_bar, text="Backend", style="Toolbar.TLabel").pack(side=tk.LEFT)
-        self.backend_var = tk.StringVar(value=BACKEND_LABELS[self.settings.backend])
-        self.backend_combo = ttk.Combobox(
-            top_bar,
-            textvariable=self.backend_var,
-            state="readonly",
-            width=18,
-            values=[BACKEND_LABELS[key] for key in (BACKEND_OLLAMA, BACKEND_REMOTE)],
-        )
+        self.backend_var = tk.StringVar(value="")
+        self.backend_combo = ttk.Combobox(top_bar, textvariable=self.backend_var, state="readonly", width=18)
         self.backend_combo.pack(side=tk.LEFT, padx=(6, 14))
         self.backend_combo.bind("<<ComboboxSelected>>", self._on_backend_selected)
+        self._refresh_backend_values()
 
         ttk.Label(top_bar, text="Model", style="Toolbar.TLabel").pack(side=tk.LEFT)
         self.model_var = tk.StringVar(value=self.settings.preferred_model())
@@ -650,21 +645,44 @@ class EditorApp:
         if error:
             self.set_status(error)
 
+    def _backend_choices(self):
+        """The backend combobox entries: ``[(label, backend, profile name or None)]``."""
+        choices = [(BACKEND_LABELS[BACKEND_OLLAMA], BACKEND_OLLAMA, None)]
+        for name in self.settings.profile_names():
+            choices.append(("Remote: {0}".format(name), BACKEND_REMOTE, name))
+        return choices
+
+    def _backend_label(self, backend=None, profile=None):
+        backend = backend or self.settings.backend
+        if backend == BACKEND_REMOTE:
+            return "Remote: {0}".format(profile or self.settings.active_profile)
+        return BACKEND_LABELS[BACKEND_OLLAMA]
+
+    def _refresh_backend_values(self):
+        """List Local Ollama plus one "Remote: <profile>" entry per relay profile."""
+        labels = [label for label, _, _ in self._backend_choices()]
+        self.backend_combo.configure(values=labels, width=min(32, max(18, max(len(label) for label in labels))))
+        self.backend_var.set(self._backend_label())
+
     def _on_backend_selected(self, event=None):
         label = self.backend_var.get()
-        backend = next(
-            (key for key, value in BACKEND_LABELS.items() if value == label),
-            BACKEND_OLLAMA,
+        backend, profile = next(
+            ((backend, profile) for choice, backend, profile in self._backend_choices() if choice == label),
+            (BACKEND_OLLAMA, None),
         )
-        self._switch_backend(backend)
+        self._switch_backend(backend, profile)
 
-    def _switch_backend(self, backend):
+    def _switch_backend(self, backend, profile=None):
+        """Activate a backend; for the remote backend ``profile`` picks the relay profile."""
         if self.generating or self._controls_locked:
-            self.backend_var.set(BACKEND_LABELS[self.settings.backend])
+            self.backend_var.set(self._backend_label())
             return
         self.settings.backend = backend
+        if backend == BACKEND_REMOTE and profile and profile != self.settings.active_profile:
+            self.settings.set_active_profile(profile)
+            self.services[BACKEND_REMOTE] = self._remote_from_settings()
         self.service = self.services[backend]
-        self.backend_var.set(BACKEND_LABELS[backend])
+        self.backend_var.set(self._backend_label(backend))
         self.model_var.set(self.settings.preferred_model(backend))
         self.model_combo.configure(values=(self.model_var.get(),) if self.model_var.get() else ())
         self._save_settings()
@@ -689,6 +707,7 @@ class EditorApp:
         self.settings = settings
         self.services[BACKEND_REMOTE] = self._remote_from_settings()
         self._save_settings()
+        self._refresh_backend_values()
         self._switch_backend(settings.backend)
         if resolve_language(settings.ui_language) != current_language():
             self.set_status(tr("Restart TextEnhanceAI to apply the language."))

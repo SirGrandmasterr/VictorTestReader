@@ -1,17 +1,26 @@
-"""Persisted application settings (backend choice, remote relay, last models, UI language).
+"""Persisted application settings (backend choice, relay profiles, last models, UI language).
 
 Settings live in ``TextEnhanceAI-settings.json`` next to the application, the
 same place the scratchpads go, and are ignored by Git. Environment variables
 seed a value when the file has none, so ``TEAI_REMOTE_URL``, ``TEAI_LANG`` and
 friends still work for scripted setups, but anything saved from the Connection dialog wins.
 
-Note: the relay API key is stored in plain text in that file. Keep the file
+Relay connections are *profiles* (``remote_profiles``: name, url, api_key,
+max_tokens, enable_thinking) with one of them ``active_profile``. The flat
+``remote_url`` / ``remote_api_key`` / ``remote_max_tokens`` /
+``remote_enable_thinking`` attributes read and write the active profile, so
+callers written for a single relay keep working; the file also carries them
+for the active profile so an older app version still finds its settings. A
+file with only the flat fields (or only the environment variables) becomes a
+single profile called "Default".
+
+Note: the relay API keys are stored in plain text in that file. Keep the file
 private, or rely on the ``TEAI_REMOTE_API_KEY`` environment variable instead.
 """
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .prompts import validate_chains, validate_custom_modes
@@ -25,6 +34,9 @@ BACKEND_LABELS = {
     BACKEND_REMOTE: "Remote GPU (relay)",
 }
 DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
+DEFAULT_PROFILE_NAME = "Default"
+DEFAULT_REMOTE_MAX_TOKENS = 4096
+PROFILE_NAME_MAX = 40
 UI_LANGUAGE_AUTO = "auto"
 UI_LANGUAGES = (UI_LANGUAGE_AUTO, "en", "de")  # "auto" follows the OS locale
 RECENT_FILES_LIMIT = 10
@@ -45,16 +57,47 @@ def _env_int(value, default):
         return default
 
 
+def normalise_profile_name(name):
+    """Collapse whitespace and cap the length; "" when nothing is left."""
+    return " ".join(str(name or "").split())[:PROFILE_NAME_MAX]
+
+
+def make_profile(name, url="", api_key="", max_tokens=DEFAULT_REMOTE_MAX_TOKENS, enable_thinking=False):
+    """Return a normalised profile dict (the shape stored in ``remote_profiles``)."""
+    return {
+        "name": normalise_profile_name(name) or DEFAULT_PROFILE_NAME,
+        "url": str(url or "").strip(),
+        "api_key": str(api_key or "").strip(),
+        "max_tokens": max(256, _env_int(str(max_tokens), DEFAULT_REMOTE_MAX_TOKENS)),
+        "enable_thinking": bool(enable_thinking),
+    }
+
+
+def _profile_from_dict(data):
+    if not isinstance(data, dict):
+        return None
+    name = normalise_profile_name(data.get("name"))
+    if not name:
+        return None
+    return make_profile(
+        name, data.get("url"), data.get("api_key"),
+        data.get("max_tokens", DEFAULT_REMOTE_MAX_TOKENS), data.get("enable_thinking", False),
+    )
+
+
+def remote_model_key(profile_name):
+    """The ``models`` key under which the last model of a relay profile is remembered."""
+    return "{0}:{1}".format(BACKEND_REMOTE, profile_name)
+
+
 @dataclass
 class AppSettings:
     """User-editable configuration with JSON persistence."""
 
     backend: str = BACKEND_OLLAMA
-    models: dict = field(default_factory=dict)
-    remote_url: str = ""
-    remote_api_key: str = ""
-    remote_max_tokens: int = 4096
-    remote_enable_thinking: bool = False
+    models: dict = field(default_factory=dict)  # backend id or "remote:<profile>" -> last model
+    remote_profiles: list = field(default_factory=list)  # [make_profile(...)], never empty after load()
+    active_profile: str = DEFAULT_PROFILE_NAME
     ui_language: str = UI_LANGUAGE_AUTO
     default_style_guide: str = ""  # pre-fills "Author's instructions" for new review projects
     default_glossary: list = field(default_factory=list)  # pre-fills "Protected terms"
@@ -69,10 +112,8 @@ class AppSettings:
     _PERSISTED = (
         "backend",
         "models",
-        "remote_url",
-        "remote_api_key",
-        "remote_max_tokens",
-        "remote_enable_thinking",
+        "remote_profiles",
+        "active_profile",
         "ui_language",
         "default_style_guide",
         "default_glossary",
@@ -82,6 +123,14 @@ class AppSettings:
         "recent_files",
         "quick_explanations",
     )
+    # written for the active profile so older versions (one relay) keep working
+    _FLAT_REMOTE = ("remote_url", "remote_api_key", "remote_max_tokens", "remote_enable_thinking")
+
+    def __post_init__(self):
+        if not self.remote_profiles:
+            self.remote_profiles = [make_profile(DEFAULT_PROFILE_NAME)]
+        if self.find_profile(self.active_profile) is None:
+            self.active_profile = self.remote_profiles[0]["name"]
 
     # ------------------------------------------------------------ persistence
     @classmethod
@@ -102,29 +151,13 @@ class AppSettings:
 
         backend = data.get("backend") or environ.get("TEAI_BACKEND") or BACKEND_OLLAMA
         settings.backend = backend if backend in BACKENDS else BACKEND_OLLAMA
+        settings.remote_profiles, settings.active_profile = cls._load_profiles(data, environ)
         models = data.get("models")
         settings.models = {
             str(key): str(value)
             for key, value in (models or {}).items()
-            if key in BACKENDS and value
+            if value and (key in BACKENDS or str(key).startswith(BACKEND_REMOTE + ":"))
         }
-        settings.remote_url = str(
-            data.get("remote_url") or environ.get("TEAI_REMOTE_URL", "") or ""
-        ).strip()
-        settings.remote_api_key = str(
-            data.get("remote_api_key") or environ.get("TEAI_REMOTE_API_KEY", "") or ""
-        ).strip()
-        if "remote_max_tokens" in data:
-            settings.remote_max_tokens = _env_int(str(data["remote_max_tokens"]), 4096)
-        else:
-            settings.remote_max_tokens = _env_int(environ.get("TEAI_REMOTE_MAX_TOKENS"), 4096)
-        if "remote_enable_thinking" in data:
-            settings.remote_enable_thinking = bool(data["remote_enable_thinking"])
-        else:
-            settings.remote_enable_thinking = _env_bool(
-                environ.get("TEAI_REMOTE_THINKING"), False
-            )
-        settings.remote_max_tokens = max(256, settings.remote_max_tokens)
         language = str(data.get("ui_language") or environ.get("TEAI_LANG", "") or "").strip().lower()
         settings.ui_language = language if language in UI_LANGUAGES else UI_LANGUAGE_AUTO
         settings.default_style_guide = str(data.get("default_style_guide") or "")
@@ -157,15 +190,56 @@ class AppSettings:
         settings.recent_files = settings.recent_files[:RECENT_FILES_LIMIT]
 
         env_model = environ.get("TEAI_MODEL", "").strip()
-        if settings.backend not in settings.models and env_model:
-            settings.models[settings.backend] = env_model
+        if env_model and not settings.preferred_model(settings.backend):
+            settings.remember_model(settings.backend, env_model)
         settings.models.setdefault(BACKEND_OLLAMA, DEFAULT_OLLAMA_MODEL)
         return settings
 
+    @classmethod
+    def _load_profiles(cls, data, environ):
+        """Return ``(profiles, active name)`` from the file, migrating flat fields or the environment."""
+        profiles = []
+        seen = set()
+        raw = data.get("remote_profiles")
+        for item in (raw if isinstance(raw, list) else []):
+            profile = _profile_from_dict(item)
+            if profile is None or profile["name"].lower() in seen:
+                continue  # damaged entries and duplicate names are dropped
+            seen.add(profile["name"].lower())
+            profiles.append(profile)
+        if not profiles:
+            # a file written by a single-relay version, or a fresh start seeded by the environment
+            url = str(data.get("remote_url") or environ.get("TEAI_REMOTE_URL", "") or "").strip()
+            key = str(data.get("remote_api_key") or environ.get("TEAI_REMOTE_API_KEY", "") or "").strip()
+            if "remote_max_tokens" in data:
+                max_tokens = _env_int(str(data["remote_max_tokens"]), DEFAULT_REMOTE_MAX_TOKENS)
+            else:
+                max_tokens = _env_int(environ.get("TEAI_REMOTE_MAX_TOKENS"), DEFAULT_REMOTE_MAX_TOKENS)
+            if "remote_enable_thinking" in data:
+                thinking = bool(data["remote_enable_thinking"])
+            else:
+                thinking = _env_bool(environ.get("TEAI_REMOTE_THINKING"), False)
+            profiles = [make_profile(DEFAULT_PROFILE_NAME, url, key, max_tokens, thinking)]
+        active = normalise_profile_name(data.get("active_profile"))
+        if not any(profile["name"] == active for profile in profiles):
+            active = profiles[0]["name"]
+        return profiles, active
+
     def to_dict(self):
-        """Return only the persisted fields."""
-        data = asdict(self)
-        return {key: data[key] for key in self._PERSISTED}
+        """Return only the persisted fields plus the active profile's flat fields."""
+        data = {}
+        for key in self._PERSISTED:
+            value = getattr(self, key)
+            if key == "remote_profiles":
+                value = [dict(profile) for profile in value]
+            elif isinstance(value, dict):
+                value = dict(value)
+            elif isinstance(value, list):
+                value = [dict(item) if isinstance(item, dict) else item for item in value]
+            data[key] = value
+        for key in self._FLAT_REMOTE:
+            data[key] = getattr(self, key)
+        return data
 
     def save(self):
         """Write the settings file; failures are reported, never raised."""
@@ -180,15 +254,134 @@ class AppSettings:
             return "Settings could not be saved: {0}".format(exc)
         return None
 
+    # -------------------------------------------------------------- profiles
+    def profile_names(self):
+        return [profile["name"] for profile in self.remote_profiles]
+
+    def find_profile(self, name):
+        """The profile dict called ``name`` (case-insensitive), or None."""
+        wanted = normalise_profile_name(name).lower()
+        for profile in self.remote_profiles:
+            if profile["name"].lower() == wanted:
+                return profile
+        return None
+
+    @property
+    def profile(self):
+        """The active profile dict (always exists)."""
+        found = self.find_profile(self.active_profile)
+        if found is None:
+            if not self.remote_profiles:
+                self.remote_profiles = [make_profile(DEFAULT_PROFILE_NAME)]
+            found = self.remote_profiles[0]
+            self.active_profile = found["name"]
+        return found
+
+    def set_active_profile(self, name):
+        """Make ``name`` the active profile; returns False when no such profile exists."""
+        found = self.find_profile(name)
+        if found is None:
+            return False
+        self.active_profile = found["name"]
+        return True
+
+    def add_profile(self, name, **fields):
+        """Append a new profile; returns it, or None when the name is empty or taken."""
+        name = normalise_profile_name(name)
+        if not name or self.find_profile(name) is not None:
+            return None
+        profile = make_profile(name, **fields)
+        self.remote_profiles.append(profile)
+        return profile
+
+    def rename_profile(self, old, new):
+        """Rename a profile (model memory follows); returns False when ``new`` is empty or taken."""
+        profile = self.find_profile(old)
+        new = normalise_profile_name(new)
+        if profile is None or not new:
+            return False
+        clash = self.find_profile(new)
+        if clash is not None and clash is not profile:
+            return False
+        previous = profile["name"]
+        profile["name"] = new
+        if self.active_profile == previous:
+            self.active_profile = new
+        remembered = self.models.pop(remote_model_key(previous), None)
+        if remembered:
+            self.models[remote_model_key(new)] = remembered
+        return True
+
+    def delete_profile(self, name):
+        """Remove a profile; the active one falls back to the first. The last profile cannot be deleted."""
+        profile = self.find_profile(name)
+        if profile is None or len(self.remote_profiles) <= 1:
+            return False
+        self.remote_profiles.remove(profile)
+        self.models.pop(remote_model_key(profile["name"]), None)
+        if self.active_profile == profile["name"]:
+            self.active_profile = self.remote_profiles[0]["name"]
+        return True
+
+    # --------------------------------------------- flat view of the active profile
+    @property
+    def remote_url(self):
+        return self.profile["url"]
+
+    @remote_url.setter
+    def remote_url(self, value):
+        self.profile["url"] = str(value or "").strip()
+
+    @property
+    def remote_api_key(self):
+        return self.profile["api_key"]
+
+    @remote_api_key.setter
+    def remote_api_key(self, value):
+        self.profile["api_key"] = str(value or "").strip()
+
+    @property
+    def remote_max_tokens(self):
+        return self.profile["max_tokens"]
+
+    @remote_max_tokens.setter
+    def remote_max_tokens(self, value):
+        self.profile["max_tokens"] = max(256, _env_int(str(value), DEFAULT_REMOTE_MAX_TOKENS))
+
+    @property
+    def remote_enable_thinking(self):
+        return self.profile["enable_thinking"]
+
+    @remote_enable_thinking.setter
+    def remote_enable_thinking(self, value):
+        self.profile["enable_thinking"] = bool(value)
+
+    @property
+    def remote_configured(self):
+        """Return whether the active relay profile has an address."""
+        return bool(self.remote_url)
+
     # --------------------------------------------------------------- helpers
+    def _model_key(self, backend):
+        backend = backend or self.backend
+        return remote_model_key(self.active_profile) if backend == BACKEND_REMOTE else backend
+
     def preferred_model(self, backend=None):
-        """Return the last model chosen for a backend ("" when unknown)."""
-        return self.models.get(backend or self.backend, "")
+        """Return the last model chosen for a backend ("" when unknown).
+
+        For the remote backend the memory is per profile; a file from before
+        profiles existed still has its choice under the plain ``remote`` key.
+        """
+        backend = backend or self.backend
+        model = self.models.get(self._model_key(backend), "")
+        if not model and backend == BACKEND_REMOTE:
+            model = self.models.get(BACKEND_REMOTE, "")
+        return model
 
     def remember_model(self, backend, model):
-        """Store the model chosen for a backend."""
+        """Store the model chosen for a backend (per profile for the remote backend)."""
         if model:
-            self.models[backend] = model
+            self.models[self._model_key(backend)] = model
 
     def remember_file(self, path):
         """Put ``path`` at the front of the recent-files list (at most RECENT_FILES_LIMIT entries)."""
@@ -211,8 +404,3 @@ class AppSettings:
             if entry["name"] == name:
                 return list(entry["steps"])
         return None
-
-    @property
-    def remote_configured(self):
-        """Return whether the remote backend has an address."""
-        return bool(self.remote_url)
