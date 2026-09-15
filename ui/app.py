@@ -6,10 +6,20 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, simpledialog, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
 from core.backend import EditCancelled, OutputTruncated
 from core.diff_engine import build_edit_session, render_reviewed_text
+from core.documents import (
+    FORMATTED_KINDS,
+    KIND_SUFFIXES,
+    MANUSCRIPT_PATTERNS,
+    DocumentError,
+    kind_for,
+    load_document,
+    save_document,
+    text_document,
+)
 from core.editing import run_chain
 from core.ollama_service import OllamaService
 from core.prompts import EDITING_MODES, PROMPTS, build_chain, build_instruction, describe_chain, validate_custom_modes
@@ -38,6 +48,22 @@ MODE_QUICK = "quick"
 MODE_AUTO = "auto"
 SEPARATOR_CUSTOM = "\u2014 Custom modes \u2014"  # unselectable headings in the mode list
 SEPARATOR_CHAINS = "\u2014 Chains \u2014"
+APP_TITLE = "TextEnhanceAI - V 0.13"
+FILE_TYPES = [
+    ("Documents", MANUSCRIPT_PATTERNS),
+    ("Text files", "*.txt *.md *.text *.markdown"),
+    ("Word documents", "*.docx"),
+    ("OpenDocument text", "*.odt"),
+    ("All files", "*.*"),
+]
+
+
+def window_title(path, modified):
+    """Title bar text: the file name (or Untitled) with a bullet while there are unsaved changes."""
+    if path is None and not modified:
+        return APP_TITLE
+    name = Path(path).name if path else "Untitled"
+    return "{0}{1} \u2014 TextEnhanceAI".format(name, " \u2022" if modified else "")
 
 
 class EditorApp:
@@ -78,13 +104,17 @@ class EditorApp:
         self._controls_locked = False
         self._previous_mode = "Grammar"
         self.last_custom_instruction = ""  # offered by "Save as preset..." after a Custom request
+        self.current_path = None  # quick-editor file (Path) or None while untitled
+        self.current_document = None  # documents.LoadedDocument the editor text came from
+        self.modified = False
 
-        self.root.title("TextEnhanceAI - V 0.13")
+        self.root.title(APP_TITLE)
         self.root.geometry("1120x780")
         self.root.minsize(900, 640)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
         self._configure_style()
+        self._build_menu()
         self._build_interface()
         self._bind_shortcuts()
         if self.settings.load_error:
@@ -98,6 +128,45 @@ class EditorApp:
 
     def _configure_style(self):
         apply_theme(self.root)
+
+    def _build_menu(self):
+        menubar = tk.Menu(self.root)
+        self.file_menu = tk.Menu(menubar, tearoff=False)
+        self.file_menu.add_command(label="Open...", accelerator="Ctrl+O", command=self.open_file)
+        self.file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.save_file)
+        self.file_menu.add_command(label="Save As...", accelerator="Ctrl+Shift+S", command=self.save_file_as)
+        self.recent_menu = tk.Menu(self.file_menu, tearoff=False)
+        self.file_menu.add_cascade(label="Recent", menu=self.recent_menu)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Send to automatic review", command=self.send_to_review)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Quit", command=self.close)
+        menubar.add_cascade(label="File", menu=self.file_menu)
+        self.root.config(menu=menubar)
+        self._rebuild_recent_menu()
+
+    def _rebuild_recent_menu(self):
+        self.recent_menu.delete(0, tk.END)
+        for entry in self.settings.recent_files:
+            self.recent_menu.add_command(label=self._recent_label(entry), command=lambda p=entry: self.open_file(p))
+        if self.settings.recent_files:
+            self.recent_menu.add_separator()
+            self.recent_menu.add_command(label="Clear list", command=self._clear_recent)
+        else:
+            self.recent_menu.add_command(label="(no recent files)", state=tk.DISABLED)
+
+    @staticmethod
+    def _recent_label(entry):
+        path = Path(entry)
+        parent = str(path.parent)
+        if len(parent) > 40:
+            parent = "\u2026" + parent[-39:]
+        return "{0}  ({1})".format(path.name, parent)
+
+    def _clear_recent(self):
+        self.settings.recent_files = []
+        self._save_settings()
+        self._rebuild_recent_menu()
 
     def _build_interface(self):
         header = ttk.Frame(self.root, style="Header.TFrame", padding=(14, 8))
@@ -254,6 +323,10 @@ class EditorApp:
 
     def _bind_shortcuts(self):
         self.root.bind_all("<Control-Return>", self._primary_shortcut)
+        self.root.bind_all("<Control-KeyPress-o>", self._open_shortcut)
+        self.root.bind_all("<Control-KeyPress-O>", self._open_shortcut)
+        self.root.bind_all("<Control-KeyPress-s>", self._save_shortcut)
+        self.root.bind_all("<Control-KeyPress-S>", self._save_shortcut)
         self.root.bind_all("<Alt-KeyPress-a>", self._accept_shortcut)
         self.root.bind_all("<Alt-KeyPress-A>", self._accept_shortcut)
         self.root.bind_all("<Alt-KeyPress-r>", self._reject_shortcut)
@@ -270,6 +343,21 @@ class EditorApp:
 
     def _in_review(self):
         return bool(self.current_session)
+
+    def _open_shortcut(self, event=None):
+        if self._in_auto():
+            return None
+        self.open_file()
+        return "break"
+
+    def _save_shortcut(self, event=None):
+        if self._in_auto():
+            return None
+        if event is not None and event.state & 0x1:  # Shift held: Save As
+            self.save_file_as()
+        else:
+            self.save_file()
+        return "break"
 
     def _in_auto(self):
         return self.mode == MODE_AUTO
@@ -421,6 +509,11 @@ class EditorApp:
             self.revision_id += 1
             self.text_area.edit_modified(False)
             self._update_counts()
+            self._set_modified(True)
+
+    def _set_modified(self, modified):
+        self.modified = bool(modified)
+        self.root.title(window_title(self.current_path, self.modified))
 
     def _update_counts(self):
         text = self.text_area.get("1.0", "end-1c")
@@ -915,7 +1008,8 @@ class EditorApp:
         self.set_status(status)
         self.text_area.focus_set()
 
-    def _set_editor_text(self, text):
+    def _set_editor_text(self, text, modified=True):
+        """Replace the editor text; ``modified=False`` when it now matches the file on disk."""
         self._suppress_modified = True
         self.text_area.configure(state=tk.NORMAL)
         self.text_area.delete("1.0", tk.END)
@@ -924,6 +1018,7 @@ class EditorApp:
         self._suppress_modified = False
         self.revision_id += 1
         self._update_counts()
+        self._set_modified(modified)
 
     def undo_applied_review(self):
         if self.last_applied_source is None:
@@ -934,7 +1029,133 @@ class EditorApp:
         self.undo_button.configure(state=tk.DISABLED)
         self.set_status("The last applied review was undone.")
 
+    # ------------------------------------------------------------------- files
+    def _confirm_discard(self):
+        """Offer to save unsaved editor changes; False when the user cancels the action."""
+        if not self.modified:
+            return True
+        name = self.current_path.name if self.current_path else "Untitled"
+        answer = messagebox.askyesnocancel("Unsaved changes", "Save the changes to {0}?".format(name))
+        if answer is None:
+            return False
+        if answer:
+            return self.save_file()
+        return True
+
+    def open_file(self, path=None):
+        """Open a .txt/.md/.docx/.odt file in the quick editor (asks when there are unsaved changes)."""
+        if self.generating:
+            return False
+        if not self._confirm_discard():
+            return False
+        if path is None:
+            path = filedialog.askopenfilename(title="Open", filetypes=FILE_TYPES, parent=self.root)
+            if not path:
+                return False
+        try:
+            document = load_document(path)
+        except (OSError, DocumentError) as exc:
+            messagebox.showerror("Cannot open file", str(exc))
+            self.settings.forget_file(path)
+            self._rebuild_recent_menu()
+            return False
+        if self.current_session:
+            self.discard_review(self.current_session)  # a review of the old text makes no sense any more
+        self.current_path = Path(path)
+        self.current_document = document
+        self.last_applied_source = None
+        self.undo_button.configure(state=tk.DISABLED)
+        self._set_editor_text(document.text, modified=False)
+        self.settings.remember_file(self.current_path)
+        self._save_settings()
+        self._rebuild_recent_menu()
+        if self.mode != MODE_QUICK:
+            self.switch_mode(MODE_QUICK)
+        self.set_status("Opened {0}.".format(self.current_path))
+        self.text_area.focus_set()
+        return True
+
+    def save_file(self):
+        """Save to the current file (Save As when untitled); returns whether it was written."""
+        if self.generating:
+            return False
+        if self.current_path is None:
+            return self.save_file_as()
+        return self._write_file(self.current_path)
+
+    def save_file_as(self):
+        if self.generating:
+            return False
+        kind = self.current_document.kind if self.current_document else "txt"
+        suffix = KIND_SUFFIXES.get(kind, ".txt")
+        path = filedialog.asksaveasfilename(
+            title="Save As", defaultextension=suffix, filetypes=FILE_TYPES, parent=self.root,
+            initialfile=self.current_path.name if self.current_path else "",
+            initialdir=str(self.current_path.parent) if self.current_path else None,
+        )
+        if not path:
+            return False
+        return self._write_file(Path(path))
+
+    def _write_file(self, path):
+        text = self.text_area.get("1.0", "end-1c")
+        document = self.current_document or text_document(text, str(path))
+        warnings = []
+        try:
+            save_document(document, text, path, warnings.append)
+        except (OSError, DocumentError) as exc:
+            messagebox.showerror("Cannot save file", str(exc))
+            return False
+        self.current_path = Path(path)
+        try:
+            # the saved file is the new baseline (for .docx/.odt the next save edits it paragraph-wise)
+            self.current_document = load_document(path) if kind_for(path) in FORMATTED_KINDS else text_document(text, str(path))
+        except (OSError, DocumentError):
+            self.current_document = text_document(text, str(path))
+        self._set_modified(False)
+        self.settings.remember_file(self.current_path)
+        self._save_settings()
+        self._rebuild_recent_menu()
+        message = "Saved {0}.".format(self.current_path)
+        if warnings:
+            message += " " + " ".join(warnings) + "."
+            messagebox.showwarning("Saved with limitations", "\n".join(warnings))
+        self.set_status(message)
+        return True
+
+    def send_to_review(self):
+        """Hand the editor's file to the automatic review (saving first, since it works on files)."""
+        if self.generating:
+            return
+        if self.current_session:
+            messagebox.showinfo("Review in progress", "Apply or discard the current review first.")
+            return
+        if not self.text_area.get("1.0", "end-1c").strip():
+            messagebox.showinfo("TextEnhanceAI", "Enter or open text first.")
+            return
+        if self.current_path is None or self.modified:
+            if not messagebox.askyesno(
+                "Save first?",
+                "The automatic review works on files. Save the text {0} now?".format(
+                    "to a file" if self.current_path is None else "to {0}".format(self.current_path.name)),
+            ):
+                return
+            if not self.save_file():
+                return
+        path = self.current_path
+        self.switch_mode(MODE_AUTO)
+        if self.workflow_screen.active:
+            messagebox.showinfo(
+                "Review project open",
+                "Close the current review project to start a new one with {0}.".format(path.name),
+            )
+            return
+        self.workflow_screen.start_view.set_file(str(path))
+        self.set_status("{0} is ready for the automatic review; check the options and start.".format(path.name))
+
     def close(self):
+        if not self._confirm_discard():
+            return
         if self.cancel_event:
             self.cancel_event.set()
         try:

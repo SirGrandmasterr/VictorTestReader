@@ -6,6 +6,7 @@ from core.settings import (
     BACKEND_OLLAMA,
     BACKEND_REMOTE,
     DEFAULT_OLLAMA_MODEL,
+    RECENT_FILES_LIMIT,
     AppSettings,
 )
 
@@ -152,3 +153,32 @@ def test_custom_modes_and_chains_round_trip_and_invalid_entries_are_dropped(tmp_
     assert damaged.custom_modes == [{"name": "Ok", "instruction": "y"}]
     assert damaged.chains == [{"name": "Fine", "steps": ["Ok", "Polish"]}]
     assert "Ignored 3 invalid custom mode/chain entries" in damaged.load_error
+
+
+def test_recent_files_keep_order_cap_and_prune_missing_files(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings.load(path, environ={})
+    assert settings.recent_files == []
+    files = []
+    for number in range(RECENT_FILES_LIMIT + 2):
+        file = tmp_path / "doc{0}.txt".format(number)
+        file.write_text("x", encoding="utf-8")
+        files.append(str(file))
+        settings.remember_file(file)
+    assert len(settings.recent_files) == RECENT_FILES_LIMIT
+    assert settings.recent_files[0] == files[-1] and files[0] not in settings.recent_files
+
+    settings.remember_file(files[3])  # re-opening moves a file to the front without duplicating it
+    assert settings.recent_files[0] == files[3] and settings.recent_files.count(files[3]) == 1
+    assert settings.save() is None
+    assert json.loads(path.read_text(encoding="utf-8"))["recent_files"] == settings.recent_files
+
+    (tmp_path / "doc3.txt").unlink()
+    reloaded = AppSettings.load(path, environ={})
+    assert files[3] not in reloaded.recent_files
+    assert reloaded.recent_files == [entry for entry in settings.recent_files if entry != files[3]]
+    reloaded.forget_file(files[-1])
+    assert files[-1] not in reloaded.recent_files
+
+    path.write_text(json.dumps({"recent_files": "not a list"}), encoding="utf-8")
+    assert AppSettings.load(path, environ={}).recent_files == []

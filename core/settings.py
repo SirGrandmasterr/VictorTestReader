@@ -27,6 +27,7 @@ BACKEND_LABELS = {
 DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
 UI_LANGUAGE_AUTO = "auto"
 UI_LANGUAGES = (UI_LANGUAGE_AUTO, "en", "de")  # "auto" follows the OS locale
+RECENT_FILES_LIMIT = 10
 
 _ENV_TRUE = {"1", "true", "yes", "on"}
 
@@ -60,6 +61,7 @@ class AppSettings:
     default_evaluation_mode: str = "combined"  # "combined" or "separate", see core.workflow
     custom_modes: list = field(default_factory=list)  # [{"name", "instruction"}], see core.prompts
     chains: list = field(default_factory=list)  # [{"name", "steps"}], steps are built-in or custom mode names
+    recent_files: list = field(default_factory=list)  # quick-editor files, most recent first
     path: Path = field(default=None, repr=False, compare=False)
     load_error: str = field(default="", repr=False, compare=False)
 
@@ -76,6 +78,7 @@ class AppSettings:
         "default_evaluation_mode",
         "custom_modes",
         "chains",
+        "recent_files",
     )
 
     # ------------------------------------------------------------ persistence
@@ -139,6 +142,13 @@ class AppSettings:
                 len(problems), "y" if len(problems) == 1 else "ies", "; ".join(problems[:3])
             )
             settings.load_error = (settings.load_error + " " + note).strip()
+        recent = data.get("recent_files")
+        settings.recent_files = []
+        for entry in (recent if isinstance(recent, list) else []):
+            entry = str(entry or "").strip()
+            if entry and entry not in settings.recent_files and Path(entry).is_file():
+                settings.recent_files.append(entry)  # files that vanished are pruned
+        settings.recent_files = settings.recent_files[:RECENT_FILES_LIMIT]
 
         env_model = environ.get("TEAI_MODEL", "").strip()
         if settings.backend not in settings.models and env_model:
@@ -173,6 +183,15 @@ class AppSettings:
         """Store the model chosen for a backend."""
         if model:
             self.models[backend] = model
+
+    def remember_file(self, path):
+        """Put ``path`` at the front of the recent-files list (at most RECENT_FILES_LIMIT entries)."""
+        path = str(path)
+        self.recent_files = [path] + [entry for entry in self.recent_files if entry != path]
+        del self.recent_files[RECENT_FILES_LIMIT:]
+
+    def forget_file(self, path):
+        self.recent_files = [entry for entry in self.recent_files if entry != str(path)]
 
     def custom_mode_names(self):
         return [entry["name"] for entry in self.custom_modes]

@@ -71,3 +71,12 @@ def test_selection_is_located_in_the_current_text_or_rejected():
     assert EditorApp._locate_selection("More. " + full, session) == (13, 25)
     assert EditorApp._locate_selection("Teh cat sat. Teh cat sat.", session) is None
     assert EditorApp._locate_selection("Gone.", session) is None
+
+
+def test_window_title_shows_file_name_and_unsaved_marker():
+    from ui.app import APP_TITLE, window_title
+
+    assert window_title(None, False) == APP_TITLE
+    assert window_title(None, True) == "Untitled \u2022 \u2014 TextEnhanceAI"
+    assert window_title("C:/books/novel.docx", False) == "novel.docx \u2014 TextEnhanceAI"
+    assert window_title("C:/books/novel.docx", True) == "novel.docx \u2022 \u2014 TextEnhanceAI"
