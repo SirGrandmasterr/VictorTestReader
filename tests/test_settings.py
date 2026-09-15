@@ -125,3 +125,30 @@ def test_unknown_backend_and_models_are_ignored(tmp_path):
 
     assert settings.backend == BACKEND_OLLAMA
     assert settings.models == {"ollama": "phi"}
+
+
+def test_custom_modes_and_chains_round_trip_and_invalid_entries_are_dropped(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings.load(path, environ={})
+    assert settings.custom_modes == [] and settings.chains == []
+    settings.custom_modes = [{"name": "House style", "instruction": "Apply it."}]
+    settings.chains = [{"name": "Tidy", "steps": ["Grammar", "House style"]}]
+    assert settings.save() is None
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["custom_modes"] == [{"name": "House style", "instruction": "Apply it."}]
+    assert stored["chains"] == [{"name": "Tidy", "steps": ["Grammar", "House style"]}]
+
+    reloaded = AppSettings.load(path, environ={})
+    assert reloaded.custom_modes == settings.custom_modes and reloaded.chains == settings.chains
+    assert reloaded.custom_mode_names() == ["House style"] and reloaded.chain_names() == ["Tidy"]
+    assert reloaded.find_chain("Tidy") == ["Grammar", "House style"] and reloaded.find_chain("x") is None
+    assert reloaded.load_error == ""
+
+    path.write_text(json.dumps({
+        "custom_modes": [{"name": "Grammar", "instruction": "x"}, {"name": "Ok", "instruction": "y"}, 5],
+        "chains": [{"name": "Broken", "steps": ["Ok", "Translate"]}, {"name": "Fine", "steps": ["Ok", "Polish"]}],
+    }), encoding="utf-8")
+    damaged = AppSettings.load(path, environ={})
+    assert damaged.custom_modes == [{"name": "Ok", "instruction": "y"}]
+    assert damaged.chains == [{"name": "Fine", "steps": ["Ok", "Polish"]}]
+    assert "Ignored 3 invalid custom mode/chain entries" in damaged.load_error

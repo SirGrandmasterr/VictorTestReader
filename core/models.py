@@ -82,6 +82,15 @@ SessionPart = Union[str, ReviewItem]
 
 
 @dataclass
+class ChainStep:
+    """One step of a chained edit: the mode name, its instruction and what the model returned."""
+
+    name: str
+    instruction: str
+    output: str = ""
+
+
+@dataclass
 class EditSession:
     """Original, proposed, and review state for one LLM edit.
 
@@ -101,6 +110,7 @@ class EditSession:
     state: str = "reviewing"
     selection: Optional[Tuple[int, int]] = None
     full_text: str = ""
+    steps: List[ChainStep] = field(default_factory=list)  # every step of a chain, in order
 
     @property
     def context_text(self):

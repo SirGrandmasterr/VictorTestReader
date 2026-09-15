@@ -1,6 +1,12 @@
 """Tests for generation result guards that do not require a Tk window."""
 
+from core.diff_engine import build_edit_session
 from ui.app import EditorApp
+
+
+def make_session(revision_id):
+    return build_edit_session("Original text.", "Proposed text.", instruction="Fix grammar.", model="model",
+                              revision_id=revision_id)
 
 
 def make_app_shell():
@@ -23,17 +29,7 @@ def make_app_shell():
 
 def test_stale_revision_result_is_discarded_before_session_creation():
     app = make_app_shell()
-    event = (
-        "generation_result",
-        7,
-        3,
-        "Original text.",
-        "Proposed text.",
-        "Fix grammar.",
-        "model",
-        None,
-        "",
-    )
+    event = ("generation_result", 7, 3, make_session(3))
 
     app._handle_generation_result(event)
 
@@ -44,17 +40,7 @@ def test_stale_revision_result_is_discarded_before_session_creation():
 
 def test_result_from_superseded_request_is_ignored():
     app = make_app_shell()
-    event = (
-        "generation_result",
-        6,
-        4,
-        "Original text.",
-        "Proposed text.",
-        "Fix grammar.",
-        "model",
-        None,
-        "",
-    )
+    event = ("generation_result", 6, 4, make_session(4))
 
     app._handle_generation_result(event)
 

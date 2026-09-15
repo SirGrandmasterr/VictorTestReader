@@ -59,3 +59,22 @@ def test_selection_only_sessions_record_the_span(tmp_path):
 
     assert "- Selection: chars 6–14 of 20 characters" in content
     assert "Keep." not in content.split("## Original text")[1].split("## Proposed text")[0]
+
+
+def test_chain_steps_are_logged_with_their_intermediate_output(tmp_path):
+    from core.models import ChainStep
+
+    session = build_edit_session("teh cat", "THE CAT", instruction="Chain: Fix -> Loud")
+    session.steps = [ChainStep("Fix", "fix", "the cat"), ChainStep("Loud", "upper", "THE CAT")]
+    logger = ScratchpadLogger(tmp_path, now_provider=lambda: datetime(2026, 7, 12, 10, 11, 15))
+
+    content = logger.log_proposal(session).read_text(encoding="utf-8")
+
+    assert "## Steps" in content
+    assert "### Step 1: Fix" in content and "- Instruction: fix" in content and "the cat" in content
+    assert "### Step 2: Loud" in content
+    assert content.index("## Steps") < content.index("## Proposed text")
+
+    single = build_edit_session("a", "b")
+    single.steps = [ChainStep("Grammar", "g", "b")]
+    assert "## Steps" not in logger.log_proposal(single).read_text(encoding="utf-8").split("---")[-1]

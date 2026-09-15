@@ -42,6 +42,18 @@ class ScratchpadLogger:
             "- Suggestions: {0}\n\n".format(len(session.review_items)),
             "## Original text\n\n",
             self._block(session.original_text),
+        ]
+        if len(session.steps) > 1:
+            # a chain: every intermediate output is kept, the last one is the proposal
+            lines.append("\n## Steps\n\n")
+            for number, step in enumerate(session.steps, 1):
+                lines.extend([
+                    "### Step {0}: {1}\n\n".format(number, step.name),
+                    "- Instruction: {0}\n\n".format(step.instruction),
+                    self._block(step.output),
+                    "\n",
+                ])
+        lines += [
             "\n## Proposed text\n\n",
             self._block(session.proposed_text),
             "\n## Suggestions\n\n",
