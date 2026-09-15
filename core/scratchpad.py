@@ -3,20 +3,26 @@
 from datetime import datetime
 from pathlib import Path
 
+from .paths import user_data_dir
 from .text_positions import describe_span
 
 
 class ScratchpadLogger:
-    """Write proposal and decision records for one app run."""
+    """Write proposal and decision records for one app run.
+
+    Scratchpads go to ``directory`` (default: the per-user data directory,
+    see ``core.paths``), created on first write.
+    """
 
     def __init__(self, directory=None, now_provider=None):
-        self.directory = Path(directory or Path.cwd())
+        self.directory = Path(directory) if directory is not None else user_data_dir()
         self.now_provider = now_provider or datetime.now
         self.path = None
 
     def _ensure_path(self):
         if self.path is None:
             timestamp = self.now_provider().strftime("%Y%m%d_%H%M%S")
+            self.directory.mkdir(parents=True, exist_ok=True)
             self.path = self.directory / (
                 "TextEnhanceAI-scratchpad_{0}.md".format(timestamp)
             )

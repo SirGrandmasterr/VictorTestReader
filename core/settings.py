@@ -1,7 +1,10 @@
 """Persisted application settings (backend choice, relay profiles, last models, UI language).
 
-Settings live in ``TextEnhanceAI-settings.json`` next to the application, the
-same place the scratchpads go, and are ignored by Git. Environment variables
+Settings live in ``TextEnhanceAI-settings.json`` in the per-user data
+directory (``core.paths.user_data_dir``: ``%APPDATA%\\TextEnhanceAI``,
+``~/Library/Application Support/TextEnhanceAI`` or
+``~/.config/TextEnhanceAI``; ``TEAI_DATA_DIR`` overrides), the same place
+the scratchpads go. Environment variables
 seed a value when the file has none, so ``TEAI_REMOTE_URL``, ``TEAI_LANG`` and
 friends still work for scripted setups, but anything saved from the Connection dialog wins.
 
@@ -29,9 +32,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import secrets
+from .paths import SETTINGS_FILENAME, user_data_dir
 from .prompts import validate_chains, validate_custom_modes
 
-SETTINGS_FILENAME = "TextEnhanceAI-settings.json"
 BACKEND_OLLAMA = "ollama"
 BACKEND_REMOTE = "remote"
 BACKENDS = (BACKEND_OLLAMA, BACKEND_REMOTE)
@@ -148,10 +151,15 @@ class AppSettings:
 
     # ------------------------------------------------------------ persistence
     @classmethod
-    def load(cls, path, environ=None):
-        """Read settings from ``path`` (missing/corrupt files fall back safely)."""
+    def default_path(cls, environ=None):
+        """The settings file in the per-user data directory (``TEAI_DATA_DIR`` overrides)."""
+        return user_data_dir(environ) / SETTINGS_FILENAME
+
+    @classmethod
+    def load(cls, path=None, environ=None):
+        """Read settings from ``path`` (default: ``default_path()``); missing/corrupt files fall back safely."""
         environ = os.environ if environ is None else environ
-        settings = cls(path=Path(path))
+        settings = cls(path=Path(path) if path is not None else cls.default_path(environ))
         data = {}
         if settings.path.exists():
             try:
@@ -343,6 +351,7 @@ class AppSettings:
         if self.path is None:
             return None
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(
                 json.dumps(self._file_view(), indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",

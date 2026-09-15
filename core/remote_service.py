@@ -29,8 +29,9 @@ from .backend import (
     truncated_message,
 )
 from .backend import StructuredOutputUnsupported as _StructuredOutputUnsupported
+from . import __version__
 
-USER_AGENT = "TextEnhanceAI/0.13"
+USER_AGENT = "TextEnhanceAI/" + __version__
 DEFAULT_TIMEOUT = 120  # seconds per blocking socket operation; relay keeps alive every 15s
 _SERVER_AUTH_OID = "1.3.6.1.5.5.7.3.1"
 

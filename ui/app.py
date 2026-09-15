@@ -1,13 +1,16 @@
-"""Main Tkinter application for TextEnhanceAI v0.13."""
+"""Main Tkinter application for TextEnhanceAI."""
 
+import platform
 import queue
 import re
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
+from core import RELEASES_URL, __version__
 from core.backend import EditCancelled, OutputTruncated, add_usage, empty_usage, format_usage
 from core.diff_engine import build_edit_session, render_reviewed_text
 from core.documents import (
@@ -22,6 +25,7 @@ from core.documents import (
 )
 from core.editing import explain_session, run_chain
 from core.ollama_service import OllamaService
+from core.paths import ensure_dir, migrate_legacy_settings, user_data_dir
 from core.prompts import EDITING_MODES, PROMPTS, build_chain, build_instruction, describe_chain, validate_custom_modes
 from core.scratchpad import ScratchpadLogger
 from core.services import build_service
@@ -48,7 +52,7 @@ MODE_QUICK = "quick"
 MODE_AUTO = "auto"
 SEPARATOR_CUSTOM = "\u2014 Custom modes \u2014"  # unselectable headings in the mode list
 SEPARATOR_CHAINS = "\u2014 Chains \u2014"
-APP_TITLE = "TextEnhanceAI - V 0.13"
+APP_TITLE = "TextEnhanceAI - V {0}".format(__version__)
 FILE_TYPES = [
     ("Documents", MANUSCRIPT_PATTERNS),
     ("Text files", "*.txt *.md *.text *.markdown"),
@@ -85,10 +89,20 @@ class EditorApp:
         ollama_service=None,
         remote_service=None,
         settings=None,
+        data_dir=None,
     ):
+        """``app_directory`` is where the script lives (legacy settings location);
+        ``data_dir`` is where settings and scratchpads go (default: ``core.paths.user_data_dir``)."""
         self.root = root
         self.app_directory = Path(app_directory or Path.cwd())
-        self.settings = settings or AppSettings.load(self.app_directory / SETTINGS_FILENAME)
+        self.data_dir = ensure_dir(Path(data_dir) if data_dir is not None else user_data_dir())
+        self.startup_notice = ""
+        if settings is None:
+            migrated = migrate_legacy_settings(self.app_directory, self.data_dir)
+            if migrated is not None:
+                self.startup_notice = "Settings migrated to {0}".format(migrated)
+            settings = AppSettings.load(self.data_dir / SETTINGS_FILENAME)
+        self.settings = settings
         set_language(self.settings.ui_language)  # before any widget text is built
         self.services = {
             BACKEND_OLLAMA: ollama_service or OllamaService(),
@@ -129,6 +143,8 @@ class EditorApp:
         self._bind_shortcuts()
         if self.settings.load_error:
             self.set_status(self.settings.load_error)
+        elif self.startup_notice:
+            self.set_status(self.startup_notice)
         self.root.after(100, self._poll_events)
         self.root.after(150, self.refresh_models)
 
@@ -152,8 +168,46 @@ class EditorApp:
         self.file_menu.add_separator()
         self.file_menu.add_command(label="Quit", command=self.close)
         menubar.add_cascade(label="File", menu=self.file_menu)
+        help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(label="Releases on GitHub", command=self.open_releases)
+        help_menu.add_separator()
+        help_menu.add_command(label="About TextEnhanceAI", command=self.show_about)
+        menubar.add_cascade(label="Help", menu=help_menu)
         self.root.config(menu=menubar)
         self._rebuild_recent_menu()
+
+    # ------------------------------------------------------------------ help
+    @staticmethod
+    def open_releases():
+        webbrowser.open(RELEASES_URL)
+
+    def about_text(self):
+        return (
+            "TextEnhanceAI {0}\n\n"
+            "Local and self-hosted LLM editing for authors.\n\n"
+            "Python {1} \u00b7 Tk {2}\n"
+            "Settings and scratchpads: {3}\n\n"
+            "New versions are published on the Releases page; this app does not update itself."
+        ).format(__version__, platform.python_version(), self.root.tk.call("info", "patchlevel"), self.data_dir)
+
+    def show_about(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("About TextEnhanceAI")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text="TextEnhanceAI", font=font(14, "bold")).pack(anchor="w")
+        ttk.Label(body, text=self.about_text(), justify=tk.LEFT, wraplength=420).pack(anchor="w", pady=(6, 12))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill=tk.X)
+        ttk.Button(buttons, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="Releases", command=self.open_releases, style="Primary.TButton").pack(
+            side=tk.RIGHT, padx=(0, 6)
+        )
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+        dialog.grab_set()
+        return dialog
 
     def _rebuild_recent_menu(self):
         self.recent_menu.delete(0, tk.END)
@@ -951,7 +1005,7 @@ class EditorApp:
             )
             return
 
-        self.current_logger = ScratchpadLogger(self.app_directory)
+        self.current_logger = ScratchpadLogger(self.data_dir)
         self.current_logger.log_proposal(session)
         if not session.review_items:
             self.current_logger.log_outcome(session, "no changes", session.original_text)

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- TextEnhanceAI app icon: a rounded slate square with a white serif "T" and a
+     small accent dot. packaging/make_icon.py renders it to icon.ico / icon.icns. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect x="8" y="8" width="240" height="240" rx="52" ry="52" fill="#1f3a5f"/>
+  <rect x="60" y="62" width="136" height="30" rx="6" ry="6" fill="#ffffff"/>
+  <rect x="113" y="62" width="30" height="132" rx="6" ry="6" fill="#ffffff"/>
+  <circle cx="186" cy="182" r="18" fill="#f2b134"/>
+</svg>

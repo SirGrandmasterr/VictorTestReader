@@ -20,5 +20,12 @@ Thumbs.db
 TextEnhanceAI-scratchpad_*.md
 TextEnhanceAI-settings.json
 
+# PyInstaller output and generated icons (packaging/make_icon.py)
+build/
+dist/
+packaging/icon.ico
+packaging/icon.icns
+packaging/icon.png
+
 # Automatic-review projects (live next to the manuscript)
 *.teai/
