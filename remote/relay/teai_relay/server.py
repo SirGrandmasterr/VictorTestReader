@@ -484,9 +484,10 @@ async def agent_websocket(request):
                 agent.apply_models(frame)
                 log.info("agent %s: state=%s models=%s", agent.name, agent.state, agent.model_ids)
             elif kind == protocol.STATUS:
-                state = frame.get("state")
-                if state in protocol.AGENT_STATES:
-                    agent.state = state
+                was_draining = agent.draining
+                agent.apply_status(frame)
+                if agent.draining and not was_draining:
+                    log.info("agent %s is draining; no new requests are routed to it", agent.name)
             elif kind in (protocol.CHUNK, protocol.DONE, protocol.RESPONSE, protocol.ERROR, protocol.CANCELLED):
                 agent.deliver(frame)
             else:

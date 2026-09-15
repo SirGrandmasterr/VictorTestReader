@@ -30,10 +30,18 @@ class FakeVLLM:
         self.bodies = []
         self.disconnected = asyncio.Event()
         self.started = asyncio.Event()
+        self.release = asyncio.Event()  # lets a "slow" stream finish early
         app = web.Application()
         app.router.add_get("/v1/models", self.models)
+        app.router.add_get("/metrics", self.metrics)
         app.router.add_post("/v1/chat/completions", self.chat)
         self.server = TestServer(app)
+
+    async def metrics(self, request):
+        return web.Response(
+            text='vllm:num_requests_running{model_name="qwen-27b"} 1\nvllm:generation_tokens_total 500\n',
+            content_type="text/plain",
+        )
 
     async def models(self, request):
         return web.json_response({"data": [{"id": "qwen-27b", "object": "model", "max_model_len": 32768}]})
@@ -58,6 +66,8 @@ class FakeVLLM:
             self.started.set()
             if self.mode == "slow":
                 for _ in range(100):
+                    if self.release.is_set():
+                        break
                     await asyncio.sleep(0.1)
                     await response.write(b": keepalive\n\n")
             await emit("text.")
@@ -108,6 +118,7 @@ class Stack:
             poll_interval_ready=0.5,
             reconnect_max_delay=1,
             ws_heartbeat=5,
+            status_interval=0.3,
         )
         self.agent = Agent(config, session=self.session)
         self.agent_task = asyncio.ensure_future(self.agent.run())
@@ -224,5 +235,60 @@ def test_wrong_key_and_unknown_model_surface_clear_errors():
                 assert "gpu-e2e (ready: qwen-27b)" in str(exc)
             else:
                 raise AssertionError("expected RemoteUnavailable")
+
+    asyncio.run(scenario())
+
+
+def test_draining_agent_finishes_the_running_request_and_refuses_new_ones():
+    async def scenario():
+        async with Stack() as stack:
+            stack.vllm.mode = "slow"
+            service = stack.client()
+            first = asyncio.ensure_future(
+                stack.in_thread(service.stream_edit, "qwen-27b", "i", "t", threading.Event())
+            )
+            await asyncio.wait_for(stack.vllm.started.wait(), timeout=5)
+            stack.agent.request_drain()
+            for _ in range(50):  # the status frame reaches the relay
+                status = await stack.in_thread(service.fetch_status)
+                if status["agents"] and status["agents"][0]["state"] == "draining":
+                    break
+                await asyncio.sleep(0.05)
+            assert status["agents"][0]["state"] == "draining"
+            assert status["agents"][0]["in_flight"] == 1
+            assert status["models"] == []  # a draining agent offers nothing
+            assert await stack.in_thread(service.list_models) == []
+            try:
+                await stack.in_thread(service.stream_edit, "qwen-27b", "i", "t", threading.Event())
+            except RemoteUnavailable as exc:
+                assert "No ready GPU agent serves model 'qwen-27b'" in str(exc)
+                assert "draining" in str(exc)
+            else:
+                raise AssertionError("expected RemoteUnavailable")
+            stack.vllm.release.set()
+            assert await asyncio.wait_for(first, timeout=10) == "Edited text."
+            await asyncio.wait_for(stack.agent_task, timeout=5)  # the agent exited after the drain
+            for _ in range(50):
+                status = await stack.in_thread(service.fetch_status)
+                if not status["agents"]:
+                    break
+                await asyncio.sleep(0.05)
+            assert status["agents"] == []
+
+    asyncio.run(scenario())
+
+
+def test_agent_metrics_reach_the_relay_status():
+    async def scenario():
+        async with Stack() as stack:
+            service = stack.client()
+            for _ in range(50):
+                status = await stack.in_thread(service.fetch_status)
+                if status["agents"] and status["agents"][0].get("metrics"):
+                    break
+                await asyncio.sleep(0.05)
+            metrics = status["agents"][0]["metrics"]
+            assert metrics["num_requests_running"] == 1
+            assert metrics["generation_tokens_total"] == 500
 
     asyncio.run(scenario())

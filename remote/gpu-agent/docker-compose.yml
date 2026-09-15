@@ -56,6 +56,9 @@ services:
     build: ./agent
     image: teai-agent:latest
     restart: unless-stopped
+    # "docker compose stop agent" sends SIGTERM: the agent drains (finishes
+    # in-flight requests, up to AGENT_DRAIN_TIMEOUT) before it exits.
+    stop_grace_period: 660s
     depends_on:
       - vllm
     environment:
@@ -67,6 +70,9 @@ services:
       AGENT_REQUEST_TIMEOUT: ${AGENT_REQUEST_TIMEOUT:-900}
       AGENT_RECONNECT_MAX_DELAY: ${AGENT_RECONNECT_MAX_DELAY:-30}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      AGENT_STATUS_INTERVAL: ${AGENT_STATUS_INTERVAL:-10}
+      AGENT_DRAIN_ON_TERM: ${AGENT_DRAIN_ON_TERM:-true}
+      AGENT_DRAIN_TIMEOUT: ${AGENT_DRAIN_TIMEOUT:-600}
       VLLM_API_KEY: ${VLLM_API_KEY:-}
       VLLM_BASE_URL: http://vllm:8000
       AGENT_HEALTH_PORT: "8090"

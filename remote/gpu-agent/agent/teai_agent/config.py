@@ -82,6 +82,9 @@ class AgentConfig:
     max_ws_message_bytes: int = 32 * 1024 * 1024
     tls_verify: bool = True
     log_level: str = "INFO"
+    status_interval: float = 10.0  # seconds between metrics scrapes / status frames
+    drain_on_term: bool = True  # SIGTERM drains (finish in-flight requests) instead of stopping at once
+    drain_timeout: float = 600.0  # seconds after which a drain aborts what is still in flight
 
     @classmethod
     def from_environ(cls, environ=None):
@@ -107,4 +110,7 @@ class AgentConfig:
             max_ws_message_bytes=_env_int(environ, "AGENT_MAX_WS_MESSAGE_MB", 32) * 1024 * 1024,
             tls_verify=environ.get("AGENT_TLS_VERIFY", "true").strip().lower() in _TRUE,
             log_level=environ.get("AGENT_LOG_LEVEL", "INFO").upper(),
+            status_interval=_env_float(environ, "AGENT_STATUS_INTERVAL", 10.0, minimum=1.0),
+            drain_on_term=environ.get("AGENT_DRAIN_ON_TERM", "true").strip().lower() in _TRUE,
+            drain_timeout=_env_float(environ, "AGENT_DRAIN_TIMEOUT", 600.0, minimum=1.0),
         )

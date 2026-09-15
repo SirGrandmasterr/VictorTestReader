@@ -61,6 +61,7 @@ class AgentConnection:
         self.agent_version = ""
         self.protocol_version = None
         self.meta = {}
+        self.metrics = {}  # optional GPU metrics from the agent's status frames (tokens/s, KV cache, ...)
         self.connected_at = time.time()
         self.last_seen = self.connected_at
         self.requests_total = 0
@@ -78,7 +79,18 @@ class AgentConnection:
         concurrency = frame.get("max_concurrency")
         if isinstance(concurrency, int) and concurrency >= 1:
             self.max_concurrency = concurrency
+        if isinstance(self.meta.get("metrics"), dict):
+            self.metrics = dict(self.meta.pop("metrics"))
         self.apply_models(frame)
+
+    def apply_status(self, frame):
+        """A periodic ``status`` frame: state (``draining`` takes the agent out of routing) and metrics."""
+        state = frame.get("state")
+        if state in protocol.AGENT_STATES:
+            self.state = state
+        if isinstance(frame.get("metrics"), dict):
+            self.metrics = dict(frame["metrics"])
+        self.last_seen = time.time()
 
     def apply_models(self, frame):
         state = frame.get("state")
@@ -96,7 +108,12 @@ class AgentConnection:
 
     @property
     def ready(self):
+        """Routable: only ``ready`` agents get requests (a draining agent keeps its socket but no new work)."""
         return self.state == protocol.STATE_READY and not self.closed
+
+    @property
+    def draining(self):
+        return self.state == protocol.STATE_DRAINING
 
     @property
     def model_ids(self):
@@ -186,6 +203,7 @@ class AgentConnection:
             "agent_version": self.agent_version,
             "key": self.key_name,
             "meta": self.meta,
+            "metrics": self.metrics,
         }
 
 

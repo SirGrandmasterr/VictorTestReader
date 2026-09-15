@@ -90,9 +90,9 @@ content beyond the fields it needs for routing (`model`, `stream`).
 
 | type        | fields                                                                                   |
 |-------------|------------------------------------------------------------------------------------------|
-| `hello`     | `protocol` (1), `agent` (name), `agent_version`, `state`, `models`, `max_concurrency`, `meta` |
-| `models`    | `state` (`loading`\|`ready`\|`unavailable`), `models` (list of `{id, max_model_len?}`)   |
-| `status`    | optional periodic `{state, in_flight}`                                                    |
+| `hello`     | `protocol` (1), `agent` (name), `agent_version`, `state`, `models`, `max_concurrency`, `meta` (may carry `metrics`) |
+| `models`    | `state` (`loading`\|`ready`\|`unavailable`\|`draining`), `models` (list of `{id, max_model_len?}`) |
+| `status`    | periodic (every `AGENT_STATUS_INTERVAL`, default 10 s) `{state, in_flight, metrics?}`      |
 | `chunk`     | `request_id`, `data` — the raw JSON payload of one SSE `data:` line from vLLM              |
 | `done`      | `request_id` — streaming finished                                                         |
 | `response`  | `request_id`, `status`, `body` — full JSON answer for non-streaming requests               |
@@ -101,6 +101,22 @@ content beyond the fields it needs for routing (`model`, `stream`).
 
 The first frame must be `hello` (sent within 30 s of connecting). A second
 connection with the same agent name replaces the first.
+
+`metrics` (optional, protocol still version 1) is what the agent scraped from
+vLLM's Prometheus `/metrics`: `num_requests_running`, `num_requests_waiting`,
+`gpu_cache_usage_perc` (0–1), `generation_tokens_total` and `tokens_per_s`
+(derived from the counter delta between two scrapes), plus `sampled_at`.
+Missing metrics are simply absent; the relay stores the latest set and shows
+it in `/status` (`agents[].metrics`) and on the admin page.
+
+**Draining.** `POST /drain` on the agent's health server (or `SIGTERM` with
+`AGENT_DRAIN_ON_TERM=1`, the default) switches the agent to state
+`draining`: it sends a `status` frame, the relay stops routing to it and
+drops its models from `/v1/models` while keeping the socket, new `request`
+frames are answered with `error` 503, in-flight requests finish normally,
+and once nothing is in flight the agent closes the socket (code 1001) and
+exits 0. After `AGENT_DRAIN_TIMEOUT` (default 600 s) whatever is still in
+flight is aborted with `error` 502.
 
 ### Relay → agent
 
