@@ -41,7 +41,7 @@ from core.settings import (
 from core.text_positions import char_offset, normalise_span, tk_index
 from core.workflow import CHECK_LABELS, STREAM_EVENT
 from .connection_dialog import ConnectionDialog
-from .dialogs import ask_name
+from .dialogs import ShortcutsDialog, ask_name
 from .i18n import N_, current_language, format_number, resolve_language, set_language, tr
 from .mode_dialog import ManageModesDialog
 from .review_panel import ReviewPanel
@@ -162,6 +162,7 @@ class EditorApp:
         self._connection = ("", COLOR_NEUTRAL)  # last message and state of the connection label
         self.thinking_log = StreamLog()  # reasoning streamed by the last requests (View > Model thinking)
         self.thinking_window = None
+        self.shortcuts_window = None
 
         self.root.title(APP_TITLE)
         self.root.geometry("1120x780")
@@ -221,6 +222,8 @@ class EditorApp:
                                   command=self.toggle_high_contrast)
         menubar.add_cascade(label=tr("View"), underline=0, menu=view_menu)
         help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(label=tr("Keyboard shortcuts..."), underline=0, accelerator="F1", command=self.show_shortcuts)
+        help_menu.add_separator()
         help_menu.add_command(label=tr("Releases on GitHub"), underline=0, command=self.open_releases)
         help_menu.add_separator()
         help_menu.add_command(label=tr("About TextEnhanceAI"), underline=0, command=self.show_about)
@@ -271,6 +274,13 @@ class EditorApp:
             version=__version__, python=platform.python_version(), tk=self.root.tk.call("info", "patchlevel"),
             directory=self.data_dir,
         )
+
+    def show_shortcuts(self, event=None):
+        if self.shortcuts_window is not None and self.shortcuts_window.winfo_exists():
+            self.shortcuts_window.lift()
+        else:
+            self.shortcuts_window = ShortcutsDialog(self.root)
+        return "break" if event else None
 
     def show_about(self):
         dialog = tk.Toplevel(self.root)
@@ -610,6 +620,7 @@ class EditorApp:
     def _bind_shortcuts(self):
         self.root.bind_all("<Control-Return>", self._primary_shortcut)
         self.root.bind_all("<Control-Shift-KeyPress-T>", self.show_thinking)
+        self.root.bind_all("<F1>", self.show_shortcuts)
         self.root.bind_all("<Control-KeyPress-o>", self._open_shortcut)
         self.root.bind_all("<Control-KeyPress-O>", self._open_shortcut)
         self.root.bind_all("<Control-KeyPress-s>", self._save_shortcut)

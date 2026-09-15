@@ -489,6 +489,10 @@ def apply_theme(root, high_contrast=None, scale=None):
                     background=PALETTE["surface"], bordercolor=PALETTE["accent"] if hc else PALETTE["surface"])
     style.map("Link.TButton", background=[("active", PALETTE["surface_alt"])],
               bordercolor=[("focus", PALETTE["focus"])])
+    style.configure("Selected.Link.TButton", background=PALETTE["selection"],
+                    bordercolor=PALETTE["accent"] if hc else PALETTE["selection"])
+    style.map("Selected.Link.TButton", background=[("active", PALETTE["surface"])],
+              bordercolor=[("focus", PALETTE["focus"])])
     # A pill in the header: the connection state and model, opens the connection menu.
     style.configure("Pill.TMenubutton", background=PALETTE["surface"], foreground=PALETTE["text"],
                     bordercolor=strong, borderwidth=border_width, relief="solid" if hc else "flat",
@@ -619,6 +623,44 @@ class Tooltip:
                 self._window.destroy()
             except tk.TclError:
                 pass
+            self._window = None
+
+
+class RowTooltip(Tooltip):
+    """A tooltip per Treeview row: ``texts`` maps row iids to what to show while the pointer rests on them."""
+
+    def __init__(self, tree, texts, delay=500):
+        super().__init__(tree, "", delay=delay)
+        self.texts = texts
+        self._row = None
+        tree.bind("<Motion>", self._moved, add="+")
+
+    def _moved(self, event):
+        row = self.widget.identify_row(event.y)
+        if row == self._row:
+            return
+        self._row = row
+        self._hide()
+        self.text = self.texts.get(row, "")
+        if self.text:
+            self._schedule()
+
+    def _show(self):
+        self._after = None
+        if self._window is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_pointerx() + 14
+            y = self.widget.winfo_pointery() + 18
+            self._window = tk.Toplevel(self.widget)
+            self._window.wm_overrideredirect(True)
+            self._window.wm_geometry("+{0}+{1}".format(x, y))
+            tk.Label(
+                self._window, text=self.text, justify=tk.LEFT, wraplength=scaled(320),
+                background=PALETTE["text"], foreground=PALETTE["surface"],
+                font=font(9), padx=8, pady=5,
+            ).pack()
+        except tk.TclError:
             self._window = None
 
 

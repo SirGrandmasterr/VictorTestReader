@@ -16,7 +16,7 @@ from core.workflow import (
 )
 from ui import theme
 from ui.review_panel import HUNK_KIND_LABELS, decision_text, display_text
-from ui.workflow_screen import STATE_LABELS, STATUS_LABELS, mark_spans, state_text, status_text
+from ui.workflow_screen import STATE_LABELS, STATUS_LABELS, mark_spans, short_term, state_text, status_short, status_text
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +74,17 @@ def test_quick_review_decisions_get_glyphs_and_hunk_kinds_get_words():
     # a hunk row never shows a bare symbol for "nothing" or a paragraph break
     assert display_text("") == "(nothing)"
     assert display_text("one\ntwo") == "one ¶ two"
+
+
+def test_tree_column_gets_the_short_status_with_the_same_glyph():
+    assert status_short(STATUS_READY, pending=3) == "○ 3 open"
+    assert status_short(STATUS_REVIEWED) == "● done"
+    assert status_short(STATUS_QUEUED) == "◌ queued"
+    assert status_short("running") == "◐ evaluating"
+    for status in (STATUS_QUEUED, "running", STATUS_ERROR, STATUS_CLEAN, STATUS_READY, STATUS_REVIEWED):
+        assert status_short(status).split(" ")[0] == status_text(status).split(" ")[0]
+    assert short_term("  a   name ") == "a name"
+    assert short_term("x" * 40) == "x" * 23 + "…"
 
 
 def test_font_roles_put_the_authors_text_and_titles_in_the_serif_face():

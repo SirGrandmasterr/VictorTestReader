@@ -3,7 +3,8 @@
 import tkinter as tk
 from tkinter import ttk
 
-from .i18n import tr
+from .i18n import N_, tr
+from .theme import font
 
 
 def center_on(window, parent):
@@ -60,3 +61,60 @@ def ask_name(parent, title, prompt, initial="", ok_label=None):
     dialog = NameDialog(parent, title, prompt, initial=initial, ok_label=ok_label)
     dialog.wait_window()
     return dialog.result
+
+
+# (heading, [(keys, what it does)]) - the source of truth for the shortcut list, see EditorApp._bind_shortcuts
+SHORTCUT_GROUPS = (
+    (N_("Everywhere"), (
+        ("Ctrl+O", N_("Open a text file")),
+        ("Ctrl+S", N_("Save the text")),
+        ("Ctrl+Shift+S", N_("Save the text under a new name")),
+        ("Ctrl+= / Ctrl+-", N_("Larger / smaller text")),
+        ("Ctrl+0", N_("Normal text size")),
+        ("Ctrl+Shift+T", N_("Watch the model's reasoning")),
+        ("F1", N_("This list")),
+    )),
+    (N_("Quick edit"), (
+        ("Ctrl+Enter", N_("Suggest edits; apply them once every suggestion is decided")),
+        ("Alt+A / Alt+R", N_("Accept / reject the shown sentence")),
+        ("Alt+← / Alt+→", N_("Previous / next suggestion")),
+        ("Alt+↑ / Alt+↓", N_("Select the previous / next individual change")),
+    )),
+    (N_("Automatic review"), (
+        ("Alt+A / Alt+R", N_("Accept / reject the selected change (or the selected rows of the list)")),
+        ("Alt+Z", N_("Undo the last decision, bulk actions as a whole")),
+        ("F2", N_("Reword the selected suggestion")),
+        ("Ctrl+E", N_("Turn the selected text into your own correction")),
+        ("Alt+← / Alt+→", N_("Previous / next segment")),
+        ("Alt+↑ / Alt+↓", N_("Select the previous / next change")),
+        ("Right click", N_("Evaluate a segment or chapter again (tree); add a correction (text)")),
+    )),
+)
+
+
+class ShortcutsDialog(tk.Toplevel):
+    """Every keyboard shortcut of the app in three columns (Help menu, F1)."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title(tr("Keyboard shortcuts"))
+        self.transient(parent.winfo_toplevel())
+        self.resizable(False, False)
+        body = ttk.Frame(self, padding=(18, 14))
+        body.pack(fill=tk.BOTH, expand=True)
+        columns = ttk.Frame(body)
+        columns.pack(fill=tk.BOTH, expand=True)
+        for column, (heading, entries) in enumerate(SHORTCUT_GROUPS):
+            group = ttk.Frame(columns, style="Card.TFrame", padding=(14, 10))
+            group.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 10, 0))
+            ttk.Label(group, text=tr(heading), style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w",
+                                                                              pady=(0, 6))
+            for row, (keys, what) in enumerate(entries, 1):
+                ttk.Label(group, text=keys, style="Surface.TLabel", font=font(10, "bold")).grid(
+                    row=row, column=0, sticky="nw", padx=(0, 12), pady=2)
+                ttk.Label(group, text=tr(what), style="SurfaceMuted.TLabel", wraplength=220, justify=tk.LEFT).grid(
+                    row=row, column=1, sticky="w", pady=2)
+        ttk.Button(body, text=tr("Close"), command=self.destroy).pack(side=tk.RIGHT, pady=(12, 0))
+        self.bind("<Escape>", lambda event: self.destroy())
+        center_on(self, parent)
+        self.focus_set()
