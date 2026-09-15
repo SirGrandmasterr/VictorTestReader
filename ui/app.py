@@ -57,8 +57,6 @@ COLOR_NEUTRAL = "neutral"
 CONNECTION_GLYPHS = {COLOR_OK: "\u25cf", COLOR_WARN: "\u25c6", COLOR_ERROR: "\u25a0", COLOR_NEUTRAL: "\u25cc"}
 MODE_QUICK = "quick"
 MODE_AUTO = "auto"
-SEPARATOR_CUSTOM = N_("\u2014 Custom modes \u2014")  # unselectable headings in the mode list
-SEPARATOR_CHAINS = N_("\u2014 Chains \u2014")
 APP_TITLE = "TextEnhanceAI - V {0}".format(__version__)
 APPLIED_HISTORY_LIMIT = 20  # applied reviews that can be undone in the quick editor
 # (label, pattern) pairs of the file dialogs; the labels are translated by file_types()
@@ -153,7 +151,6 @@ class EditorApp:
         self._suppress_modified = False
         self.mode = MODE_QUICK
         self._controls_locked = False
-        self._previous_mode = "Grammar"
         self.last_custom_instruction = ""  # offered by "Save as preset..." after a Custom request
         self.current_path = None  # quick-editor file (Path) or None while untitled
         self.current_document = None  # documents.LoadedDocument the editor text came from
@@ -392,18 +389,11 @@ class EditorApp:
         controls.columnconfigure(0, weight=1)
         ttk.Label(row, text=tr("Ask the model to"), style="SurfaceMuted.TLabel").pack(side=tk.LEFT)
         self.mode_var = tk.StringVar(value=tr(MODE_LABELS["Grammar"]))
-        self.mode_combo = ttk.Combobox(
-            row,
-            textvariable=self.mode_var,
-            state="readonly",
-            values=self._mode_values(),
-            width=21,
-        )
-        self.mode_combo.pack(side=tk.LEFT, padx=(8, 2))
-        self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_selected)
-        modes = ttk.Button(row, text=tr("Modes..."), style="Small.Surface.Ghost.TButton", command=self.open_mode_dialog)
-        modes.pack(side=tk.LEFT, padx=(0, 10))
-        Tooltip(modes, tr("Save your own instructions as presets and chain several modes."))
+        self.mode_button = ttk.Menubutton(row, text=self.mode_var.get(), style="Mode.TMenubutton", direction="below")
+        self.mode_menu = tk.Menu(self.mode_button, tearoff=False, postcommand=self._fill_mode_menu)
+        self.mode_button.configure(menu=self.mode_menu)
+        self.mode_button.pack(side=tk.LEFT, padx=(8, 10))
+        Tooltip(self.mode_button, tr("Built-in modes, your own presets and chains of modes; the last entry manages them."))
         self.explain_var = tk.BooleanVar(value=self.settings.quick_explanations)
         explain = ttk.Checkbutton(
             row, text=tr("Explain changes"), variable=self.explain_var, command=self._on_explain_toggled,
@@ -419,6 +409,11 @@ class EditorApp:
         )
         self.review_button.pack(side=tk.RIGHT)
         ttk.Label(row, text=tr("Ctrl+Enter"), style="Surface.Kbd.TLabel").pack(side=tk.RIGHT, padx=(0, 8))
+        whole = ttk.Button(row, text=tr("Review the whole file..."), style="Small.Surface.Ghost.TButton",
+                           command=self.send_to_review)
+        whole.pack(side=tk.RIGHT, padx=(0, 12))
+        Tooltip(whole, tr("Hand this file to the automatic review: chapter by chapter, every change with a reason, "
+                          "decisions saved as you go."))
         below = ttk.Frame(controls, style="Surface.TFrame")
         below.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         self.mode_description_var = tk.StringVar(value=PROMPTS["Grammar"])
@@ -532,7 +527,7 @@ class EditorApp:
         self.instruction_text.bind("<KeyRelease>", lambda event: self._instruction_changed())
         side = ttk.Frame(self.instruction_frame, style="Surface.TFrame")
         side.grid(row=0, column=2, sticky="n")
-        self.history_button = ttk.Menubutton(side, text=tr("Recent instructions") + " ▾", style="Small.TMenubutton")
+        self.history_button = ttk.Menubutton(side, text=tr("Recent instructions"), style="Small.TMenubutton")
         self.history_menu = tk.Menu(self.history_button, tearoff=False, postcommand=self._fill_history_menu)
         self.history_button.configure(menu=self.history_menu)
         self.history_button.pack(anchor="e")
@@ -837,15 +832,26 @@ class EditorApp:
         return tr(label) if label else mode
 
     def _mode_values(self):
-        """Built-in modes, then the custom presets and chains under unselectable headings (display names)."""
-        values = [self.mode_label(mode) for mode in EDITING_MODES]
-        custom = self.settings.custom_mode_names()
-        if custom:
-            values += [tr(SEPARATOR_CUSTOM)] + custom
-        chains = self.settings.chain_names()
-        if chains:
-            values += [tr(SEPARATOR_CHAINS)] + chains
-        return values
+        """Every selectable mode as a display name: built-in modes, then the custom presets, then the chains."""
+        return [self.mode_label(mode) for mode in EDITING_MODES] + self.settings.custom_mode_names() + self.settings.chain_names()
+
+    def _fill_mode_menu(self):
+        """The mode picker's menu: built-in modes, then presets and chains in their own sections."""
+        menu = self.mode_menu
+        menu.delete(0, tk.END)
+        for mode in EDITING_MODES:
+            menu.add_radiobutton(label=self.mode_label(mode), variable=self.mode_var, value=self.mode_label(mode),
+                                 command=self._on_mode_selected)
+        for heading, names in ((tr("My presets"), self.settings.custom_mode_names()),
+                               (tr("Chains"), self.settings.chain_names())):
+            if not names:
+                continue
+            menu.add_separator()
+            menu.add_command(label=heading, state=tk.DISABLED)
+            for name in names:
+                menu.add_radiobutton(label=name, variable=self.mode_var, value=name, command=self._on_mode_selected)
+        menu.add_separator()
+        menu.add_command(label=tr("Manage modes..."), command=self.open_mode_dialog)
 
     def _mode_key(self, label=None):
         """The mode identifier (PROMPTS key, custom mode or chain name) behind a display name."""
@@ -857,21 +863,15 @@ class EditorApp:
 
     def _refresh_mode_values(self, select=None):
         values = self._mode_values()
-        self.mode_combo.configure(values=values)
         select = self.mode_label(select) if select else None
         if select in values:
             self.mode_var.set(select)
         elif self.mode_var.get() not in values:
             self.mode_var.set(self.mode_label("Grammar"))
-        self._previous_mode = self.mode_var.get()
-        self._update_mode_description()
+        self._on_mode_selected()
 
     def _on_mode_selected(self, event=None):
-        mode = self.mode_var.get()
-        if mode in (tr(SEPARATOR_CUSTOM), tr(SEPARATOR_CHAINS)):
-            self.mode_var.set(self._previous_mode)  # headings cannot be chosen
-            return
-        self._previous_mode = mode
+        self.mode_button.configure(text=self.mode_var.get())
         self._update_mode_description()
 
     def _update_mode_description(self, event=None):
@@ -1274,7 +1274,7 @@ class EditorApp:
         self.generating = generating
         editor_state = tk.DISABLED if generating else tk.NORMAL
         self.text_area.configure(state=editor_state)
-        self.mode_combo.configure(state="disabled" if generating else "readonly")
+        self.mode_button.configure(state=tk.DISABLED if generating else tk.NORMAL)
         self._update_control_states()
         self.review_button.configure(state=tk.DISABLED if generating else tk.NORMAL)
         self.cancel_button.configure(state=tk.NORMAL if generating else tk.DISABLED)
@@ -1701,11 +1701,15 @@ class EditorApp:
         path = self.current_path
         self.switch_mode(MODE_AUTO)
         if self.workflow_screen.active:
-            messagebox.showinfo(
+            if not messagebox.askyesno(
                 tr("Review project open"),
-                tr("Close the current review project to start a new one with {name}.", name=path.name),
-            )
-            return
+                tr("Close the current review project (its progress is saved) and start a new one with {name}?",
+                   name=path.name),
+            ):
+                return
+            self.workflow_screen.close_project()
+            if self.workflow_screen.active:
+                return  # the user kept a running evaluation
         self.workflow_screen.start_view.set_file(str(path))
         self.set_status(tr("{name} is ready for the automatic review; check the options and start.", name=path.name))
 

@@ -499,6 +499,12 @@ def apply_theme(root, high_contrast=None, scale=None):
                     padding=(10, 4), font=small, arrowsize=0)
     style.map("Pill.TMenubutton", background=[("active", PALETTE["surface_alt"])],
               bordercolor=[("focus", PALETTE["focus"])])
+    # The editing-mode picker: looks like a field, opens a menu.
+    style.configure("Mode.TMenubutton", background=PALETTE["surface"], foreground=PALETTE["text"],
+                    bordercolor=strong, borderwidth=border_width, relief="solid" if hc else "flat",
+                    padding=(10, 5), font=base, width=20)
+    style.map("Mode.TMenubutton", background=[("active", PALETTE["surface_alt"])],
+              bordercolor=[("focus", PALETTE["focus"]), ("active", PALETTE["accent"])])
     for name, color in (("Ok", PALETTE["success"]), ("Warn", PALETTE["warning"]), ("Error", PALETTE["danger"])):
         style.configure("{0}.Pill.TMenubutton".format(name), foreground=color, font=small_bold)
     style.configure("TSeparator", background=PALETTE["border"])
