@@ -45,7 +45,7 @@ from .dialogs import ShortcutsDialog, ask_name
 from .i18n import N_, current_language, format_number, resolve_language, set_language, tr
 from .mode_dialog import ManageModesDialog
 from .review_panel import ReviewPanel
-from .theme import Tooltip, apply_theme, font, style_text, subscribe
+from .theme import Toast, Tooltip, apply_theme, font, style_text, subscribe
 from .thinking_window import StreamLog, ThinkingWindow
 from .workflow_screen import WorkflowScreen
 
@@ -167,6 +167,7 @@ class EditorApp:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
         self._configure_style()
+        self.toast = Toast(self.root)
         self._build_menu()
         self._build_interface()
         self._bind_shortcuts()
@@ -911,7 +912,7 @@ class EditorApp:
         self.settings.custom_modes = modes
         self._save_settings()
         self._refresh_mode_values(select=modes[-1]["name"])
-        self.set_status(tr("Preset “{name}” saved.", name=modes[-1]["name"]))
+        self.notify(tr("Preset “{name}” saved.", name=modes[-1]["name"]))
 
     def open_mode_dialog(self):
         ManageModesDialog(self.root, self.settings.custom_modes, self.settings.chains, on_save=self._apply_modes)
@@ -925,6 +926,17 @@ class EditorApp:
 
     def set_status(self, message):
         self.status_var.set(message)
+
+    def average_request_seconds(self):
+        """Mean model time per request in this session (None before the first answer); feeds the start view's estimate."""
+        totals = self.session_usage
+        if not totals["requests"] or not totals["seconds"]:
+            return None
+        return totals["seconds"] / float(totals["requests"])
+
+    def notify(self, message, action=None):
+        """Show a routine outcome as a toast (with one optional ``(label, callback)`` button)."""
+        self.toast.show(message, action=action)
 
     def record_usage(self, record):
         """Add one request's token counts to the session total shown in the status bar."""
@@ -1319,7 +1331,7 @@ class EditorApp:
             self.current_logger.log_outcome(session, "no changes", session.original_text)
             self.current_logger = None
             self.set_status(tr("{model} did not suggest any changes.", model=model))
-            messagebox.showinfo(tr("Review complete"), tr("No changes were suggested."))
+            self.notify(tr("No changes were suggested."))
             return
 
         self.current_session = session
@@ -1490,6 +1502,7 @@ class EditorApp:
         if span:
             self._select_span(span[0], span[0] + len(final_text))
         self._leave_review(tr("Reviewed changes applied."))
+        self.notify(tr("Reviewed changes applied."), action=(tr("Undo"), self.undo_applied_review))
 
     # ------------------------------------------------------- applied history
     def _remember_applied(self, before, after, label):

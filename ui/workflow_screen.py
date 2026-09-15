@@ -66,6 +66,7 @@ from core.workflow import (
     resync_project,
     start_stream,
 )
+from .dialogs import reveal
 from .i18n import N_, format_number, tr
 from .theme import (
     CHECK_COLORS,
@@ -171,6 +172,20 @@ def _format_eta(seconds):
     if minutes < 60:
         return tr("~{minutes} min left", minutes=minutes)
     return tr("~{hours} h {minutes:02d} min left", hours=minutes // 60, minutes=minutes % 60)
+
+
+def estimate_text(requests, seconds_per_request=None, parallelism=1):
+    """What a review will cost in requests and, once this session has timing data, roughly in minutes."""
+    if not seconds_per_request:
+        return tr("≈ {requests} model requests", requests=format_number(requests))
+    minutes = requests * seconds_per_request / max(1, parallelism) / 60.0
+    if minutes < 1.5:
+        when = tr("about a minute with this model")
+    elif minutes < 90:
+        when = tr("about {minutes} min with this model", minutes=int(round(minutes)))
+    else:
+        when = tr("about {hours} h {minutes:02d} min with this model", hours=int(minutes // 60), minutes=int(minutes % 60))
+    return tr("≈ {requests} model requests · {when}", requests=format_number(requests), when=when)
 
 
 class StyleGuideBox(tk.Text):
@@ -890,18 +905,22 @@ class WorkflowScreen(ttk.Frame):
         except OSError as exc:
             messagebox.showerror(tr("Export failed"), tr("The export failed: {error}", error=exc))
             return
-        self.host.set_status(tr("Exported to {path}", path=paths.get("formatted") or paths["document"]))
-        message = tr("Reviewed manuscript:\n{document}\n\nChapter files:\n{folder}\n\nReport:\n{report}",
-                     document=paths["document"], folder=paths["document"].parent / "reviewed", report=paths["report"])
-        if paths.get("formatted"):
-            kind = self.project.document_kind
-            message = "{0} ({1}):\n{2}\n\n{3}\n\n{4}".format(
-                tr(KIND_LABELS[kind]) if kind in KIND_LABELS else tr("Document"), paths["formatted"].suffix,
-                paths["formatted"], tr(FORMATTING_NOTE), message,
-            )
+        exported = paths.get("formatted") or paths["document"]
+        self.host.set_status(tr("Exported to {path}", path=exported))
         if paths["warnings"]:
+            message = tr("Reviewed manuscript:\n{document}\n\nChapter files:\n{folder}\n\nReport:\n{report}",
+                         document=paths["document"], folder=paths["document"].parent / "reviewed", report=paths["report"])
+            if paths.get("formatted"):
+                kind = self.project.document_kind
+                message = "{0} ({1}):\n{2}\n\n{3}\n\n{4}".format(
+                    tr(KIND_LABELS[kind]) if kind in KIND_LABELS else tr("Document"), paths["formatted"].suffix,
+                    paths["formatted"], tr(FORMATTING_NOTE), message,
+                )
             message += "\n\n" + tr("Limitations:") + "\n- " + "\n- ".join(paths["warnings"])
-        messagebox.showinfo(tr("Export complete"), message)
+            messagebox.showwarning(tr("Exported with limitations"), message)
+            return
+        self.host.notify(tr("Exported {name}; the chapter files and the report are next to it.", name=exported.name),
+                         action=(tr("Open folder"), lambda: reveal(exported.parent)))
 
     # -------------------------------------------------------- relay status
     def _schedule_status_poll(self, delay=RELAY_STATUS_INTERVAL_MS):
@@ -1274,9 +1293,18 @@ class StartView(ttk.Frame):
             ttk.Checkbutton(row, text=tr("auto-accept"), variable=self.auto_vars[check],
                             style="Surface.TCheckbutton").pack(side=tk.RIGHT)
 
-        # --- splitting & model
-        options = self._card(body, tr("3. Splitting and evaluation"))
-        options.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        # --- the rest is tuning: shown on request
+        self.advanced_shown = False
+        self.advanced_button = ttk.Button(body, style="Ghost.TButton", command=self._toggle_advanced)
+        self.advanced_button.grid(row=2, column=0, sticky="w", pady=(0, 10))
+        Tooltip(self.advanced_button, tr("How the manuscript is split, how the checks are run, and the standing "
+                                         "instructions and protected terms sent with every request."))
+        self.advanced = ttk.Frame(body)
+        self.advanced.columnconfigure(0, weight=1)
+        advanced = self.advanced
+
+        options = self._card(advanced, tr("3. Splitting and evaluation"))
+        options.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         grid = ttk.Frame(options, style="Surface.TFrame")
         grid.pack(fill=tk.X)
         grid.columnconfigure(1, weight=1)
@@ -1338,8 +1366,8 @@ class StartView(ttk.Frame):
                      width=14).pack(side=tk.LEFT)
 
         # --- author's instructions and protected terms
-        guide = self._card(body, tr("4. Author's instructions"), tr(STYLE_GUIDE_HINT))
-        guide.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        guide = self._card(advanced, tr("4. Author's instructions"), tr(STYLE_GUIDE_HINT))
+        guide.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         self.style_guide_box = StyleGuideBox(guide, height=4)
         self.style_guide_box.pack(fill=tk.X)
         ttk.Label(guide, text=tr("Protected terms"), style="CardTitle.TLabel").pack(anchor="w", pady=(12, 0))
@@ -1356,9 +1384,24 @@ class StartView(ttk.Frame):
         ttk.Button(actions, text=tr("Open existing project..."), command=self.open_existing).pack(side=tk.LEFT, padx=8)
         self.estimate_var = tk.StringVar(value="")
         ttk.Label(actions, textvariable=self.estimate_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=12)
+        self.host = None  # set by refresh_defaults; answers average_request_seconds() for the estimate
+        self._label_advanced()
+
+    def _label_advanced(self):
+        glyph = "▾" if self.advanced_shown else "▸"
+        self.advanced_button.configure(text="{0} {1}".format(glyph, tr("Advanced options")))
+
+    def _toggle_advanced(self):
+        self.advanced_shown = not self.advanced_shown
+        if self.advanced_shown:
+            self.advanced.grid(row=3, column=0, sticky="ew")
+        else:
+            self.advanced.grid_remove()
+        self._label_advanced()
 
     def refresh_defaults(self, host):
         """Suggest a parallelism that suits the backend and pre-fill the author's instructions."""
+        self.host = host
         try:
             self.parallel_var.set("1" if host.backend_id() == "ollama" else "2")
         except Exception:
@@ -1458,7 +1501,14 @@ class StartView(ttk.Frame):
             requests = segments
         else:
             requests = segments * checks * (2 if options.explain else 1)
-        self.estimate_var.set(tr("≈ {requests} model requests", requests=requests) if checks else tr("No check enabled"))
+        self.estimate_var.set(estimate_text(requests, self._average_request_seconds(), options.parallelism) if checks
+                              else tr("No check enabled"))
+
+    def _average_request_seconds(self):
+        try:
+            return self.host.average_request_seconds() if self.host is not None else None
+        except Exception:
+            return None
 
     def start(self):
         if not self.path:

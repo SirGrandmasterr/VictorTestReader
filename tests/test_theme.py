@@ -16,7 +16,16 @@ from core.workflow import (
 )
 from ui import theme
 from ui.review_panel import HUNK_KIND_LABELS, decision_text, display_text
-from ui.workflow_screen import STATE_LABELS, STATUS_LABELS, mark_spans, short_term, state_text, status_short, status_text
+from ui.workflow_screen import (
+    STATE_LABELS,
+    STATUS_LABELS,
+    estimate_text,
+    mark_spans,
+    short_term,
+    state_text,
+    status_short,
+    status_text,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +94,15 @@ def test_tree_column_gets_the_short_status_with_the_same_glyph():
         assert status_short(status).split(" ")[0] == status_text(status).split(" ")[0]
     assert short_term("  a   name ") == "a name"
     assert short_term("x" * 40) == "x" * 23 + "…"
+
+
+def test_start_view_estimate_turns_into_minutes_once_timing_is_known():
+    assert estimate_text(1240) == "≈ 1,240 model requests"
+    assert estimate_text(1240, None, 4) == "≈ 1,240 model requests"
+    assert estimate_text(3, 12.0) == "≈ 3 model requests · about a minute with this model"
+    assert estimate_text(120, 6.0, 1) == "≈ 120 model requests · about 12 min with this model"
+    assert estimate_text(120, 6.0, 4) == "≈ 120 model requests · about 3 min with this model"
+    assert estimate_text(1240, 9.0, 2) == "≈ 1,240 model requests · about 1 h 33 min with this model"
 
 
 def test_font_roles_put_the_authors_text_and_titles_in_the_serif_face():

@@ -499,6 +499,13 @@ def apply_theme(root, high_contrast=None, scale=None):
                     padding=(10, 4), font=small, arrowsize=0)
     style.map("Pill.TMenubutton", background=[("active", PALETTE["surface_alt"])],
               bordercolor=[("focus", PALETTE["focus"])])
+    # Toasts: ink on paper inverted, like the tooltips.
+    style.configure("Toast.TFrame", background=PALETTE["text"])
+    style.configure("Toast.TLabel", background=PALETTE["text"], foreground=PALETTE["surface"], font=base)
+    style.configure("Toast.TButton", background=PALETTE["text"], foreground=PALETTE["accent_soft"],
+                    bordercolor=PALETTE["accent_soft"], padding=(8, 3), font=small_bold, relief="solid", borderwidth=1)
+    style.map("Toast.TButton", background=[("active", PALETTE["muted"])], foreground=[("active", PALETTE["surface"])],
+              bordercolor=[("focus", PALETTE["surface"])])
     # The editing-mode picker: looks like a field, opens a menu.
     style.configure("Mode.TMenubutton", background=PALETTE["surface"], foreground=PALETTE["text"],
                     bordercolor=strong, borderwidth=border_width, relief="solid" if hc else "flat",
@@ -630,6 +637,58 @@ class Tooltip:
             except tk.TclError:
                 pass
             self._window = None
+
+
+class Toast:
+    """A short notice in the window's lower right corner; it goes away by itself, on click, or with the next one.
+
+    ``show(message, action=(label, callback))`` adds one button, for "Undo"
+    or "Open folder". Routine outcomes belong here; the status bar keeps
+    describing the state.
+    """
+
+    def __init__(self, root, seconds=5.0):
+        self.root = root
+        self.seconds = seconds
+        self._frame = None
+        self._after = None
+
+    def show(self, message, action=None, seconds=None):
+        self.hide()
+        try:
+            frame = ttk.Frame(self.root, style="Toast.TFrame", padding=(14, 9))
+            label = ttk.Label(frame, text=message, style="Toast.TLabel", wraplength=scaled(380), justify=tk.LEFT)
+            label.pack(side=tk.LEFT)
+            if action is not None:
+                text, callback = action
+
+                def act():
+                    self.hide()
+                    callback()
+
+                ttk.Button(frame, text=text, style="Toast.TButton", command=act).pack(side=tk.LEFT, padx=(14, 0))
+            for widget in (frame, label):
+                widget.bind("<Button-1>", lambda event: self.hide())
+            frame.place(relx=1.0, rely=1.0, x=-scaled(18), y=-scaled(54), anchor="se")
+            frame.lift()
+            self._frame = frame
+            self._after = self.root.after(int((seconds or self.seconds) * 1000), self.hide)
+        except tk.TclError:
+            self._frame = None
+
+    def hide(self):
+        if self._after is not None:
+            try:
+                self.root.after_cancel(self._after)
+            except tk.TclError:
+                pass
+            self._after = None
+        if self._frame is not None:
+            try:
+                self._frame.destroy()
+            except tk.TclError:
+                pass
+            self._frame = None
 
 
 class RowTooltip(Tooltip):

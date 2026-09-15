@@ -1,10 +1,28 @@
 """Small themed dialogs shared by the screens (the Tk ``simpledialog`` ones ignore the palette and scale)."""
 
+import os
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import ttk
 
 from .i18n import N_, tr
 from .theme import font
+
+
+def reveal(path):
+    """Open ``path`` (a folder or file) with the desktop's file manager; returns whether that was possible."""
+    path = str(path)
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)  # noqa: S606 - the user asked to open their own export folder
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return True
+    except OSError:
+        return False
 
 
 def center_on(window, parent):
