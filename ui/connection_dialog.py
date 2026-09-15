@@ -9,6 +9,7 @@ from core.remote_service import RemoteService, normalise_api_key
 from core.secrets import INSTALL_HINT, keyring_available
 from core.settings import BACKEND_LABELS, BACKEND_OLLAMA, BACKEND_REMOTE, UI_LANGUAGES
 from .i18n import LANGUAGE_LABELS, tr
+from .theme import PALETTE, style_text
 
 
 class ConnectionDialog(tk.Toplevel):
@@ -67,14 +68,14 @@ class ConnectionDialog(tk.Toplevel):
         self.backend_var = tk.StringVar(value=self.settings.backend)
         ttk.Radiobutton(
             backend_box,
-            text=tr("{backend} — models installed on this computer", backend=BACKEND_LABELS[BACKEND_OLLAMA]),
+            text=tr("{backend} — models installed on this computer", backend=tr(BACKEND_LABELS[BACKEND_OLLAMA])),
             value=BACKEND_OLLAMA,
             variable=self.backend_var,
             command=self._update_remote_state,
         ).pack(anchor="w")
         ttk.Radiobutton(
             backend_box,
-            text=tr("{backend} — a GPU server reached through your relay", backend=BACKEND_LABELS[BACKEND_REMOTE]),
+            text=tr("{backend} — a GPU server reached through your relay", backend=tr(BACKEND_LABELS[BACKEND_REMOTE])),
             value=BACKEND_REMOTE,
             variable=self.backend_var,
             command=self._update_remote_state,
@@ -153,7 +154,7 @@ class ConnectionDialog(tk.Toplevel):
         if not self.keyring_available:
             self.keyring_check.configure(state=tk.DISABLED)
             ttk.Label(keyring_row, text=tr("(not available: {hint})", hint=INSTALL_HINT),
-                      foreground="#555555").pack(side=tk.LEFT, padx=(6, 0))
+                      style="Muted.TLabel").pack(side=tk.LEFT, padx=(6, 0))
 
         test_row = ttk.Frame(self.remote_box)
         test_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(10, 0))
@@ -163,16 +164,9 @@ class ConnectionDialog(tk.Toplevel):
         self.test_status_label = ttk.Label(test_row, textvariable=self.test_status_var, wraplength=360)
         self.test_status_label.pack(side=tk.LEFT, padx=(10, 0), fill=tk.X, expand=True)
 
-        self.details = tk.Text(
-            self.remote_box,
-            height=5,
-            width=60,
-            wrap=tk.WORD,
-            relief=tk.FLAT,
-            background="#f3f4f6",
-            font=("Segoe UI", 9),
-            state=tk.DISABLED,
-        )
+        self.details = tk.Text(self.remote_box, height=5, width=60)
+        style_text(self.details, size=9, background=PALETTE["surface_alt"], readonly=True, mono=True)
+        self.details.configure(padx=6, pady=4, highlightthickness=0)
         self.details.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
         preferences = ttk.LabelFrame(body, text=tr("Preferences"), padding=8)
@@ -191,12 +185,12 @@ class ConnectionDialog(tk.Toplevel):
         self.language_combo.grid(row=0, column=1, sticky="w", padx=(6, 0))
         self.language_combo.bind("<<ComboboxSelected>>", self._on_language_selected)
         self.language_status_var = tk.StringVar(value="")
-        ttk.Label(preferences, textvariable=self.language_status_var, foreground="#555555").grid(
+        ttk.Label(preferences, textvariable=self.language_status_var, style="Muted.TLabel").grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
 
         self.storage_note_var = tk.StringVar(value="")
-        ttk.Label(body, textvariable=self.storage_note_var, wraplength=480, foreground="#555555").pack(
+        ttk.Label(body, textvariable=self.storage_note_var, wraplength=480, style="Muted.TLabel").pack(
             anchor="w", pady=(10, 0)
         )
         self._update_storage_note()
@@ -313,15 +307,14 @@ class ConnectionDialog(tk.Toplevel):
 
     def _update_storage_note(self):
         """The plain-text warning is shown only while the keys are going to live in the file."""
+        path = self.settings.path or "TextEnhanceAI-settings.json"
         if self._keyring_selected():
             self.storage_note_var.set(tr(
-                "Settings are saved next to the application in TextEnhanceAI-settings.json; "
-                "the relay API keys are kept in the system keyring."
+                "Settings are saved in {path}; the relay API keys are kept in the system keyring.", path=path
             ))
         else:
             self.storage_note_var.set(tr(
-                "Settings are saved next to the application in "
-                "TextEnhanceAI-settings.json (the API key is stored in plain text)."
+                "Settings are saved in {path} (the API key is stored in plain text).", path=path
             ))
 
     def _update_remote_state(self):
@@ -409,11 +402,11 @@ class ConnectionDialog(tk.Toplevel):
         except tk.TclError:
             return
         if kind == "ok":
-            self.test_status_var.set(message)
-            self.test_status_label.configure(foreground="#176b32")
+            self.test_status_var.set("\u25cf " + message)
+            self.test_status_label.configure(foreground=PALETTE["success"])
         else:
-            self.test_status_var.set(message)
-            self.test_status_label.configure(foreground="#9b1c1c")
+            self.test_status_var.set("\u2716 " + message)
+            self.test_status_label.configure(foreground=PALETTE["danger"])
         self._set_details(details)
 
     def _save_shortcut(self, event=None):
@@ -425,8 +418,8 @@ class ConnectionDialog(tk.Toplevel):
         backend = self.backend_var.get()
         url = self.url_var.get().strip()
         if backend == BACKEND_REMOTE and not url:
-            self.test_status_var.set(tr("Enter the relay URL before saving."))
-            self.test_status_label.configure(foreground="#9b1c1c")
+            self.test_status_var.set("\u2716 " + tr("Enter the relay URL before saving."))
+            self.test_status_label.configure(foreground=PALETTE["danger"])
             return
         self._store_fields()
         self.settings.backend = backend

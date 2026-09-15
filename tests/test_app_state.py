@@ -80,3 +80,21 @@ def test_window_title_shows_file_name_and_unsaved_marker():
     assert window_title(None, True) == "Untitled \u2022 \u2014 TextEnhanceAI"
     assert window_title("C:/books/novel.docx", False) == "novel.docx \u2014 TextEnhanceAI"
     assert window_title("C:/books/novel.docx", True) == "novel.docx \u2022 \u2014 TextEnhanceAI"
+
+
+def test_mode_labels_and_file_types_follow_the_ui_language():
+    from ui.app import MODE_LABELS, file_types
+    from ui.i18n import set_language
+    from core.prompts import EDITING_MODES
+
+    assert set(MODE_LABELS) == set(EDITING_MODES)
+    try:
+        set_language("de")
+        assert EditorApp.mode_label("Grammar") == "Grammatik"
+        assert EditorApp.mode_label("My preset") == "My preset"  # custom modes keep their name
+        assert file_types()[0][0] == "Dokumente"
+        assert file_types()[-1] == ("Alle Dateien", "*.*")
+    finally:
+        set_language("en")
+    assert EditorApp.mode_label("Grammar") == "Grammar"
+    assert file_types()[0][0] == "Documents"

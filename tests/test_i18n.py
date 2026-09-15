@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import string
 import sys
 from pathlib import Path
 
@@ -86,10 +87,44 @@ def test_auto_follows_the_system_locale(monkeypatch, locales):
     assert resolve_language("auto") == "en"
 
 
-def test_shipped_german_locale_loads_even_while_empty():
+def test_shipped_german_locale_translates_ui_and_core_labels():
+    from core.change_kinds import CHANGE_KIND_LABELS
+    from core.workflow import CHECK_LABELS, FALLBACK_EXPLANATIONS
+
     assert (i18n.LOCALES_DIR / "de.json").exists()
     assert set_language("de") == "de"
-    assert tr("Save") == "Save"
+    assert tr("Save") == "Speichern"
+    assert tr("Accept") == "\u00dcbernehmen" and tr("Reject") == "Verwerfen"
+    assert tr(CHECK_LABELS["spelling"]) == "Rechtschreibung"
+    assert tr(CHECK_LABELS["grammar"]) == "Grammatik"
+    assert tr(CHECK_LABELS["expression"]) == "Ausdruck"
+    assert tr(CHANGE_KIND_LABELS["word_choice"]) == "Wortwahl"
+    assert tr(FALLBACK_EXPLANATIONS["spelling"]) == "Rechtschreibkorrektur."
+    assert tr("Suggestion {number} of {total}", number=2, total=5) == "Vorschlag 2 von 5"
+    assert tr("Model output that is not in the table") == "Model output that is not in the table"
+
+
+def test_marker_returns_the_source_and_format_number_follows_the_language():
+    assert i18n.N_("Queued") == "Queued"
+    assert i18n.format_number(1234567) == "1,234,567"
+    assert i18n.format_number(999) == "999"
+    assert i18n.format_number("x") == "x"
+    set_language("de")
+    assert i18n.format_number(1234567) == "1.234.567"
+    assert i18n.format_number(0) == "0"
+    set_language("en")
+    assert i18n.format_number(12345) == "12,345"
+
+
+def test_core_source_strings_list_the_english_label_tables():
+    from core.settings import BACKEND_LABELS
+    from core.workflow import CHECK_DESCRIPTIONS, CHECK_LABELS, EVALUATION_LABELS
+
+    strings = i18n.core_source_strings()
+    assert strings == sorted(set(strings))
+    for table in (CHECK_LABELS, CHECK_DESCRIPTIONS, EVALUATION_LABELS, BACKEND_LABELS):
+        assert set(table.values()) <= set(strings)
+    assert "Ollama" in strings and "remote model" in strings
 
 
 # ------------------------------------------------------------- settings
@@ -124,13 +159,14 @@ def test_extract_strings_finds_literal_tr_calls(tmp_path):
         'c = tr("two " "parts")\n'
         'd = i18n.tr("Dotted")\n'
         'e = tr(dynamic)\n'
-        'f = other("Not me")\n',
+        'f = other("Not me")\n'
+        'LABELS = {"x": N_("Marked constant")}\n',
         encoding="utf-8",
     )
     strings = extract.collect_source_strings(tmp_path)
-    assert strings == ["Connecting to {url} ...", "Dotted", "Save", "two parts"]
+    assert strings == ["Connecting to {url} ...", "Dotted", "Marked constant", "Save", "two parts"]
     assert extract.missing_strings(strings, {"Save": "Speichern", "Dotted": ""}) == [
-        "Connecting to {url} ...", "Dotted", "two parts"
+        "Connecting to {url} ...", "Dotted", "Marked constant", "two parts"
     ]
 
 
@@ -142,6 +178,22 @@ def test_extract_strings_covers_the_connection_dialog():
         assert expected in strings
     # Placeholders are named so translators can reorder them.
     assert not any("{0}" in text for text in strings)
+
+
+def test_every_ui_source_string_has_a_matching_german_translation():
+    """New tr()/N_() strings (and core labels the UI shows) cannot land without a German entry."""
+    extract = _extract_module()
+    strings = extract.collect_source_strings(ROOT / "ui")
+    table = extract.load_locale(ROOT / "locales" / "de.json")
+    assert extract.missing_strings(strings, table) == []
+    formatter = string.Formatter()
+    for source in strings:
+        fields = {field for _, field, _, _ in formatter.parse(source) if field}
+        translated = {field for _, field, _, _ in formatter.parse(table[source]) if field}
+        assert fields == translated, "placeholders differ for {0!r}".format(source)
+        assert not any("{0}" in text for text in (source, table[source]))
+    stale = sorted(set(table) - set(strings))
+    assert stale == [], "locales/de.json has entries without a source string"
 
 
 def test_extract_strings_cli_reports_missing_and_can_update(tmp_path, monkeypatch, capsys):

@@ -8,6 +8,10 @@ The application offers two complementary environments:
 
 ![TextEnhanceAI review screen](https://github.com/wenrolland/TextEnhanceAI/blob/main/TextEnhanceAI-v0.13.png)
 
+The same review screen with the German interface (`TEAI_LANG=de` or **Connection... → Language**):
+
+![TextEnhanceAI review screen in German](TextEnhanceAI-de.png)
+
 ---
 
 ## Key Capabilities
@@ -62,7 +66,8 @@ The application offers two complementary environments:
 - **Zero Third-Party Cloud Dependencies:** Run completely offline using local models via Ollama or over an encrypted private tunnel to your own GPU server. No manuscript text is ever logged on intermediate relays.
 - **Remote GPU Support (Relay + vLLM):** Connect to a powerful remote GPU server (e.g. hosting a 27B+ parameter model) through an outbound-only reverse relay—no public ports or inbound firewall holes required.
 - **Prefix Caching Optimization:** Review prompts place manuscript text before instructions (`text_first=True`) so vLLM and caching-enabled backends maximize KV-cache reuse across checks of the same segment.
-- **Multi-Language UI (i18n):** User interface localized in English and German with automatic system language detection and manual switching.
+- **Multi-Language UI (i18n):** The complete user interface is available in English and German (`locales/de.json`), following the system language or the choice in the Connection dialog; model prompts stay English and explanation language remains a per-project option.
+- **Accessibility:** Every state is shown as a glyph plus a word, never by colour alone (tree rows, change cards, the chapter view's optional `[+]`/`[~]`/`[−]` markers, the quick review's removed/added labels). The View menu (and `Ctrl+=` / `Ctrl+-` / `Ctrl+0`) scales every font from 80 % to 200 %, and **High contrast** switches to a black-on-white palette with thick borders and a yellow selection; both are remembered. Cards, links and dialogs are reachable with Tab; the selected card carries a visible focus border.
 - **Persistent State:** Projects are saved in `<manuscript>.teai/project.json` after every decision, ensuring zero progress loss on application restart.
 
 ---
@@ -213,7 +218,7 @@ For maximum speed and quality, TextEnhanceAI can connect to an external GPU serv
 Complete deployment instructions and wire protocol documentation are in [remote/README.md](remote/README.md) and [remote/PROTOCOL.md](remote/PROTOCOL.md).
 
 Settings are stored in `TextEnhanceAI-settings.json` (ignored by Git). Environment variables can seed initial settings:
-`TEAI_BACKEND`, `TEAI_REMOTE_URL`, `TEAI_REMOTE_API_KEY`, `TEAI_REMOTE_MAX_TOKENS`, `TEAI_REMOTE_THINKING`, `TEAI_LANG`, and `TEAI_MODEL`.
+`TEAI_BACKEND`, `TEAI_REMOTE_URL`, `TEAI_REMOTE_API_KEY`, `TEAI_REMOTE_MAX_TOKENS`, `TEAI_REMOTE_THINKING`, `TEAI_LANG`, `TEAI_UI_SCALE`, `TEAI_HIGH_CONTRAST`, and `TEAI_MODEL`.
 
 ---
 
@@ -275,7 +280,9 @@ The test suite runs completely offline using simulated backends and recorded res
   - Added model-side hallucination guard flagging suspicious expansions with amber warning badges and one-click bulk rejection.
   - Added author style guide and protected glossary lists with wildcard stem protection (`*`).
   - Added prompt ordering optimization for server-side KV prefix caching.
-  - Added multi-language UI framework (English and German).
+  - Added multi-language UI framework (English and German) and a complete German translation.
+  - Added an accessibility pass: glyph-plus-word states, chapter-view text markers, font scaling (`Ctrl+=` / `Ctrl+-` / `Ctrl+0`), a high-contrast palette and keyboard-reachable cards.
+  - Added opt-in long-run stability tests (`pytest -m slow -q`) for the evaluation runner and the relay path.
 - **Version 0.13:** Added structured sentence and word-group review, safe mixed decisions, cancellation, connection status, enhanced scratchpads, undo, and automated tests.
 - **Version 0.12:** Added local model selection and background generation.
 - **Version 0.11:** Preserved line breaks after editing.

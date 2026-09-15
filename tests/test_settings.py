@@ -8,7 +8,10 @@ from core.settings import (
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_PROFILE_NAME,
     RECENT_FILES_LIMIT,
+    UI_SCALE_MAX,
+    UI_SCALE_MIN,
     AppSettings,
+    clamp_ui_scale,
     make_profile,
     remote_model_key,
 )
@@ -45,6 +48,38 @@ def test_environment_seeds_missing_values(tmp_path):
     assert settings.remote_enable_thinking is True
     assert settings.preferred_model(BACKEND_REMOTE) == "qwen-27b"
     assert settings.preferred_model(BACKEND_OLLAMA) == DEFAULT_OLLAMA_MODEL
+
+
+def test_ui_scale_and_high_contrast_are_clamped_seeded_and_persisted(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings.load(path, environ={})
+    assert settings.ui_scale == 1.0
+    assert settings.high_contrast is False
+
+    assert clamp_ui_scale(1.24) == 1.2  # one decimal
+    assert clamp_ui_scale(0.1) == UI_SCALE_MIN
+    assert clamp_ui_scale(9) == UI_SCALE_MAX
+    assert clamp_ui_scale("abc") == 1.0
+    assert clamp_ui_scale(None) == 1.0
+
+    seeded = AppSettings.load(path, environ={"TEAI_UI_SCALE": "1.6", "TEAI_HIGH_CONTRAST": "yes"})
+    assert seeded.ui_scale == 1.6
+    assert seeded.high_contrast is True
+    assert AppSettings.load(path, environ={"TEAI_UI_SCALE": "huge"}).ui_scale == 1.0
+
+    settings.ui_scale = 3.5  # the setter is not clamped, the file round trip is
+    settings.high_contrast = True
+    assert settings.save() is None
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["ui_scale"] == 3.5 and stored["high_contrast"] is True
+    reloaded = AppSettings.load(path, environ={"TEAI_UI_SCALE": "1.2", "TEAI_HIGH_CONTRAST": "no"})
+    assert reloaded.ui_scale == UI_SCALE_MAX  # file wins over the environment, then clamped
+    assert reloaded.high_contrast is True
+
+    path.write_text(json.dumps({"ui_scale": "not a number", "high_contrast": 0}), encoding="utf-8")
+    damaged = AppSettings.load(path, environ={})
+    assert damaged.ui_scale == 1.0
+    assert damaged.high_contrast is False
 
 
 def test_default_style_guide_is_persisted(tmp_path):

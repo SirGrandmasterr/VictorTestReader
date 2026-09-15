@@ -48,6 +48,9 @@ DEFAULT_REMOTE_MAX_TOKENS = 4096
 PROFILE_NAME_MAX = 40
 UI_LANGUAGE_AUTO = "auto"
 UI_LANGUAGES = (UI_LANGUAGE_AUTO, "en", "de")  # "auto" follows the OS locale
+UI_SCALE_MIN = 0.8  # font scale (Ctrl+= / Ctrl+-), see ui/theme.py apply_scale
+UI_SCALE_MAX = 2.0
+UI_SCALE_STEP = 0.1
 RECENT_FILES_LIMIT = 10
 
 _ENV_TRUE = {"1", "true", "yes", "on"}
@@ -64,6 +67,19 @@ def _env_int(value, default):
         return int(value) if value not in (None, "") else default
     except ValueError:
         return default
+
+
+def _env_float(value, default):
+    try:
+        return float(value) if value not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
+def clamp_ui_scale(value):
+    """Round a font scale to one decimal inside ``UI_SCALE_MIN``..``UI_SCALE_MAX`` (bad values mean 1.0)."""
+    scale = _env_float(value, 1.0)
+    return round(min(UI_SCALE_MAX, max(UI_SCALE_MIN, scale)), 1)
 
 
 def normalise_profile_name(name):
@@ -108,6 +124,8 @@ class AppSettings:
     remote_profiles: list = field(default_factory=list)  # [make_profile(...)], never empty after load()
     active_profile: str = DEFAULT_PROFILE_NAME
     ui_language: str = UI_LANGUAGE_AUTO
+    ui_scale: float = 1.0  # font scale, clamped to UI_SCALE_MIN..UI_SCALE_MAX
+    high_contrast: bool = False  # high-contrast palette (ui/theme.py)
     default_style_guide: str = ""  # pre-fills "Author's instructions" for new review projects
     default_glossary: list = field(default_factory=list)  # pre-fills "Protected terms"
     default_evaluation_mode: str = "combined"  # "combined" or "separate", see core.workflow
@@ -132,6 +150,8 @@ class AppSettings:
         "active_profile",
         "use_keyring",
         "ui_language",
+        "ui_scale",
+        "high_contrast",
         "default_style_guide",
         "default_glossary",
         "default_evaluation_mode",
@@ -183,6 +203,11 @@ class AppSettings:
         }
         language = str(data.get("ui_language") or environ.get("TEAI_LANG", "") or "").strip().lower()
         settings.ui_language = language if language in UI_LANGUAGES else UI_LANGUAGE_AUTO
+        settings.ui_scale = clamp_ui_scale(data["ui_scale"] if "ui_scale" in data else environ.get("TEAI_UI_SCALE"))
+        if "high_contrast" in data:
+            settings.high_contrast = bool(data["high_contrast"])
+        else:
+            settings.high_contrast = _env_bool(environ.get("TEAI_HIGH_CONTRAST"), False)
         settings.default_style_guide = str(data.get("default_style_guide") or "")
         glossary = data.get("default_glossary")
         if isinstance(glossary, str):

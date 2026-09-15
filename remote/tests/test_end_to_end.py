@@ -27,6 +27,7 @@ CLIENT_KEY = "teai_client_key_0123456789"
 class FakeVLLM:
     def __init__(self):
         self.mode = "normal"
+        self.chunk_delay = 0.0  # pause before the last chunk (long-run test: keeps requests in flight)
         self.bodies = []
         self.disconnected = asyncio.Event()
         self.started = asyncio.Event()
@@ -70,6 +71,8 @@ class FakeVLLM:
                         break
                     await asyncio.sleep(0.1)
                     await response.write(b": keepalive\n\n")
+            if self.chunk_delay:
+                await asyncio.sleep(self.chunk_delay)
             await emit("text.")
             await emit(None, "stop")
             if (body.get("stream_options") or {}).get("include_usage"):

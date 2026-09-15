@@ -34,48 +34,71 @@ from core.settings import (
     BACKEND_OLLAMA,
     BACKEND_REMOTE,
     SETTINGS_FILENAME,
+    UI_SCALE_STEP,
     AppSettings,
+    clamp_ui_scale,
 )
 from core.text_positions import char_offset, normalise_span, tk_index
 from .connection_dialog import ConnectionDialog
-from .i18n import current_language, resolve_language, set_language, tr
+from .i18n import N_, current_language, format_number, resolve_language, set_language, tr
 from .mode_dialog import ManageModesDialog
 from .review_panel import ReviewPanel
-from .theme import PALETTE, Tooltip, apply_theme, font, style_text
+from .theme import PALETTE, Tooltip, apply_theme, font, style_text, subscribe
 from .workflow_screen import WorkflowScreen
 
-COLOR_OK = PALETTE["success"]
-COLOR_WARN = PALETTE["warning"]
-COLOR_ERROR = PALETTE["danger"]
-COLOR_NEUTRAL = PALETTE["header_muted"]
+# connection label states (colour plus a glyph, see _set_connection)
+COLOR_OK = "ok"
+COLOR_WARN = "warn"
+COLOR_ERROR = "error"
+COLOR_NEUTRAL = "neutral"
+CONNECTION_GLYPHS = {COLOR_OK: "\u25cf", COLOR_WARN: "\u26a0", COLOR_ERROR: "\u2716", COLOR_NEUTRAL: "\u25cb"}
 MODE_QUICK = "quick"
 MODE_AUTO = "auto"
-SEPARATOR_CUSTOM = "\u2014 Custom modes \u2014"  # unselectable headings in the mode list
-SEPARATOR_CHAINS = "\u2014 Chains \u2014"
+SEPARATOR_CUSTOM = N_("\u2014 Custom modes \u2014")  # unselectable headings in the mode list
+SEPARATOR_CHAINS = N_("\u2014 Chains \u2014")
 APP_TITLE = "TextEnhanceAI - V {0}".format(__version__)
+# (label, pattern) pairs of the file dialogs; the labels are translated by file_types()
 FILE_TYPES = [
-    ("Documents", MANUSCRIPT_PATTERNS),
-    ("Text files", "*.txt *.md *.text *.markdown"),
-    ("Word documents", "*.docx"),
-    ("OpenDocument text", "*.odt"),
-    ("All files", "*.*"),
+    (N_("Documents"), MANUSCRIPT_PATTERNS),
+    (N_("Text files"), "*.txt *.md *.text *.markdown"),
+    (N_("Word documents"), "*.docx"),
+    (N_("OpenDocument text"), "*.odt"),
+    (N_("All files"), "*.*"),
 ]
+# Built-in editing modes are shown translated; the PROMPTS keys stay the identifiers (see _mode_key).
+MODE_LABELS = {
+    "Grammar": N_("Grammar"),
+    "Proofread": N_("Proofread"),
+    "Natural": N_("Natural"),
+    "Streamline": N_("Streamline"),
+    "Awkward": N_("Awkward"),
+    "Rewrite": N_("Rewrite"),
+    "Concise": N_("Concise"),
+    "Polish": N_("Polish"),
+    "Improve": N_("Improve"),
+    "Translate": N_("Translate"),
+    "Custom": N_("Custom"),
+}
+
+
+def file_types():
+    return [(tr(label), pattern) for label, pattern in FILE_TYPES]
 
 
 def _format_duration(seconds):
     seconds = int(seconds or 0)
     if seconds < 60:
-        return "{0} s".format(seconds)
+        return tr("{seconds} s", seconds=seconds)
     if seconds < 3600:
-        return "{0} min {1:02d} s".format(seconds // 60, seconds % 60)
-    return "{0} h {1:02d} min".format(seconds // 3600, (seconds % 3600) // 60)
+        return tr("{minutes} min {seconds:02d} s", minutes=seconds // 60, seconds=seconds % 60)
+    return tr("{hours} h {minutes:02d} min", hours=seconds // 3600, minutes=(seconds % 3600) // 60)
 
 
 def window_title(path, modified):
     """Title bar text: the file name (or Untitled) with a bullet while there are unsaved changes."""
     if path is None and not modified:
         return APP_TITLE
-    name = Path(path).name if path else "Untitled"
+    name = Path(path).name if path else tr("Untitled")
     return "{0}{1} \u2014 TextEnhanceAI".format(name, " \u2022" if modified else "")
 
 
@@ -100,7 +123,7 @@ class EditorApp:
         if settings is None:
             migrated = migrate_legacy_settings(self.app_directory, self.data_dir)
             if migrated is not None:
-                self.startup_notice = "Settings migrated to {0}".format(migrated)
+                self.startup_notice = tr("Settings migrated to {migrated}", migrated=migrated)
             settings = AppSettings.load(self.data_dir / SETTINGS_FILENAME)
         self.settings = settings
         set_language(self.settings.ui_language)  # before any widget text is built
@@ -117,7 +140,7 @@ class EditorApp:
         self.generating = False
         self.generation_started_at = None
         self.generation_label = ""
-        self.generation_verb = "Generating review"  # or "Editing selection (N words)"
+        self.generation_verb = tr("Generating review")  # or "Editing selection (N words)"
         self._progress_chars = 0
         self.current_session = None
         self.current_logger = None
@@ -131,6 +154,7 @@ class EditorApp:
         self.current_document = None  # documents.LoadedDocument the editor text came from
         self.modified = False
         self.session_usage = empty_usage()  # token counts of every request since the app started
+        self._connection = ("", COLOR_NEUTRAL)  # last message and state of the connection label
 
         self.root.title(APP_TITLE)
         self.root.geometry("1120x780")
@@ -153,28 +177,75 @@ class EditorApp:
         return build_service(self.settings, BACKEND_REMOTE)
 
     def _configure_style(self):
-        apply_theme(self.root)
+        apply_theme(self.root, high_contrast=self.settings.high_contrast, scale=self.settings.ui_scale)
+        subscribe(self._restyle)
+
+    def _restyle(self):
+        """Re-apply palette colours to the plain Tk widgets after a theme change."""
+        if not hasattr(self, "text_area"):
+            return
+        style_text(self.text_area, size=11)
+        self.text_area.configure(state=tk.DISABLED if self.generating else tk.NORMAL)
+        self.connection_label.configure(background=PALETTE["header"])
+        self._set_connection(*self._connection)
 
     def _build_menu(self):
         menubar = tk.Menu(self.root)
         self.file_menu = tk.Menu(menubar, tearoff=False)
-        self.file_menu.add_command(label="Open...", accelerator="Ctrl+O", command=self.open_file)
-        self.file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.save_file)
-        self.file_menu.add_command(label="Save As...", accelerator="Ctrl+Shift+S", command=self.save_file_as)
+        self.file_menu.add_command(label=tr("Open..."), underline=0, accelerator="Ctrl+O", command=self.open_file)
+        self.file_menu.add_command(label=tr("Save"), underline=0, accelerator="Ctrl+S", command=self.save_file)
+        self.file_menu.add_command(label=tr("Save As..."), underline=5, accelerator="Ctrl+Shift+S", command=self.save_file_as)
         self.recent_menu = tk.Menu(self.file_menu, tearoff=False)
-        self.file_menu.add_cascade(label="Recent", menu=self.recent_menu)
+        self.file_menu.add_cascade(label=tr("Recent"), underline=0, menu=self.recent_menu)
         self.file_menu.add_separator()
-        self.file_menu.add_command(label="Send to automatic review", command=self.send_to_review)
+        self.file_menu.add_command(label=tr("Send to automatic review"), underline=8, command=self.send_to_review)
         self.file_menu.add_separator()
-        self.file_menu.add_command(label="Quit", command=self.close)
-        menubar.add_cascade(label="File", menu=self.file_menu)
+        self.file_menu.add_command(label=tr("Quit"), underline=0, command=self.close)
+        menubar.add_cascade(label=tr("File"), underline=0, menu=self.file_menu)
+        view_menu = tk.Menu(menubar, tearoff=False)
+        view_menu.add_command(label=tr("Larger text"), underline=0, accelerator="Ctrl++", command=lambda: self.zoom(1))
+        view_menu.add_command(label=tr("Smaller text"), underline=0, accelerator="Ctrl+-", command=lambda: self.zoom(-1))
+        view_menu.add_command(label=tr("Normal text size"), underline=0, accelerator="Ctrl+0", command=lambda: self.zoom(0))
+        view_menu.add_separator()
+        self.high_contrast_var = tk.BooleanVar(value=bool(self.settings.high_contrast))
+        view_menu.add_checkbutton(label=tr("High contrast"), underline=0, variable=self.high_contrast_var,
+                                  command=self.toggle_high_contrast)
+        menubar.add_cascade(label=tr("View"), underline=0, menu=view_menu)
         help_menu = tk.Menu(menubar, tearoff=False)
-        help_menu.add_command(label="Releases on GitHub", command=self.open_releases)
+        help_menu.add_command(label=tr("Releases on GitHub"), underline=0, command=self.open_releases)
         help_menu.add_separator()
-        help_menu.add_command(label="About TextEnhanceAI", command=self.show_about)
-        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label=tr("About TextEnhanceAI"), underline=0, command=self.show_about)
+        menubar.add_cascade(label=tr("Help"), underline=0, menu=help_menu)
         self.root.config(menu=menubar)
         self._rebuild_recent_menu()
+
+    # ------------------------------------------------------------ view menu
+    def zoom(self, direction):
+        """Scale every font up (1), down (-1) or back to 100 % (0); persisted as ``ui_scale``."""
+        if direction == 0:
+            scale = 1.0
+        else:
+            scale = clamp_ui_scale(self.settings.ui_scale + direction * UI_SCALE_STEP)
+        if scale == self.settings.ui_scale and direction != 0:
+            self.set_status(tr("Text size is already at {scale:.0f} %.", scale=scale * 100))
+            return "break"
+        self.settings.ui_scale = scale
+        apply_theme(self.root, scale=scale)
+        self._save_settings()
+        self.set_status(tr("Text size {scale:.0f} %.", scale=scale * 100))
+        return "break"
+
+    def toggle_high_contrast(self, enabled=None):
+        """Switch between the normal and the high-contrast palette (View menu)."""
+        if enabled is None:
+            enabled = bool(self.high_contrast_var.get())
+        else:
+            self.high_contrast_var.set(bool(enabled))
+        self.settings.high_contrast = bool(enabled)
+        apply_theme(self.root, high_contrast=self.settings.high_contrast)
+        self._save_settings()
+        self.set_status(tr("High contrast on.") if enabled else tr("High contrast off."))
+        return "break"
 
     # ------------------------------------------------------------------ help
     @staticmethod
@@ -182,17 +253,19 @@ class EditorApp:
         webbrowser.open(RELEASES_URL)
 
     def about_text(self):
-        return (
-            "TextEnhanceAI {0}\n\n"
+        return tr(
+            "TextEnhanceAI {version}\n\n"
             "Local and self-hosted LLM editing for authors.\n\n"
-            "Python {1} \u00b7 Tk {2}\n"
-            "Settings and scratchpads: {3}\n\n"
-            "New versions are published on the Releases page; this app does not update itself."
-        ).format(__version__, platform.python_version(), self.root.tk.call("info", "patchlevel"), self.data_dir)
+            "Python {python} \u00b7 Tk {tk}\n"
+            "Settings and scratchpads: {directory}\n\n"
+            "New versions are published on the Releases page; this app does not update itself.",
+            version=__version__, python=platform.python_version(), tk=self.root.tk.call("info", "patchlevel"),
+            directory=self.data_dir,
+        )
 
     def show_about(self):
         dialog = tk.Toplevel(self.root)
-        dialog.title("About TextEnhanceAI")
+        dialog.title(tr("About TextEnhanceAI"))
         dialog.transient(self.root)
         dialog.resizable(False, False)
         body = ttk.Frame(dialog, padding=16)
@@ -201,8 +274,8 @@ class EditorApp:
         ttk.Label(body, text=self.about_text(), justify=tk.LEFT, wraplength=420).pack(anchor="w", pady=(6, 12))
         buttons = ttk.Frame(body)
         buttons.pack(fill=tk.X)
-        ttk.Button(buttons, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
-        ttk.Button(buttons, text="Releases", command=self.open_releases, style="Primary.TButton").pack(
+        ttk.Button(buttons, text=tr("Close"), command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text=tr("Releases"), command=self.open_releases, style="Primary.TButton").pack(
             side=tk.RIGHT, padx=(0, 6)
         )
         dialog.bind("<Escape>", lambda event: dialog.destroy())
@@ -215,9 +288,9 @@ class EditorApp:
             self.recent_menu.add_command(label=self._recent_label(entry), command=lambda p=entry: self.open_file(p))
         if self.settings.recent_files:
             self.recent_menu.add_separator()
-            self.recent_menu.add_command(label="Clear list", command=self._clear_recent)
+            self.recent_menu.add_command(label=tr("Clear list"), command=self._clear_recent)
         else:
-            self.recent_menu.add_command(label="(no recent files)", state=tk.DISABLED)
+            self.recent_menu.add_command(label=tr("(no recent files)"), state=tk.DISABLED)
 
     @staticmethod
     def _recent_label(entry):
@@ -236,17 +309,17 @@ class EditorApp:
         header = ttk.Frame(self.root, style="Header.TFrame", padding=(14, 8))
         header.grid(row=0, column=0, sticky="ew")
         ttk.Label(header, text="TextEnhanceAI", style="Header.TLabel").pack(side=tk.LEFT)
-        ttk.Label(header, text="local & remote LLM editing", style="HeaderMuted.TLabel").pack(
+        ttk.Label(header, text=tr("local & remote LLM editing"), style="HeaderMuted.TLabel").pack(
             side=tk.LEFT, padx=(8, 18), pady=(3, 0)
         )
         self.mode_buttons = {}
-        for mode, label in ((MODE_QUICK, "Quick edit"), (MODE_AUTO, "Automatic review")):
+        for mode, label in ((MODE_QUICK, tr("Quick edit")), (MODE_AUTO, tr("Automatic review"))):
             button = ttk.Button(
                 header, text=label, style="Nav.TButton", command=lambda m=mode: self.switch_mode(m)
             )
             button.pack(side=tk.LEFT, padx=(0, 4))
             self.mode_buttons[mode] = button
-        self.connection_var = tk.StringVar(value="Checking...")
+        self.connection_var = tk.StringVar(value="{0} {1}".format(CONNECTION_GLYPHS[COLOR_NEUTRAL], tr("Checking...")))
         self.connection_label = tk.Label(
             header,
             textvariable=self.connection_var,
@@ -259,14 +332,14 @@ class EditorApp:
 
         top_bar = ttk.Frame(self.root, style="Toolbar.TFrame", padding=(12, 6))
         top_bar.grid(row=1, column=0, sticky="ew")
-        ttk.Label(top_bar, text="Backend", style="Toolbar.TLabel").pack(side=tk.LEFT)
+        ttk.Label(top_bar, text=tr("Backend"), style="Toolbar.TLabel").pack(side=tk.LEFT)
         self.backend_var = tk.StringVar(value="")
         self.backend_combo = ttk.Combobox(top_bar, textvariable=self.backend_var, state="readonly", width=18)
         self.backend_combo.pack(side=tk.LEFT, padx=(6, 14))
         self.backend_combo.bind("<<ComboboxSelected>>", self._on_backend_selected)
         self._refresh_backend_values()
 
-        ttk.Label(top_bar, text="Model", style="Toolbar.TLabel").pack(side=tk.LEFT)
+        ttk.Label(top_bar, text=tr("Model"), style="Toolbar.TLabel").pack(side=tk.LEFT)
         self.model_var = tk.StringVar(value=self.settings.preferred_model())
         self.model_combo = ttk.Combobox(
             top_bar,
@@ -278,11 +351,11 @@ class EditorApp:
         self.model_combo.pack(side=tk.LEFT, padx=(6, 6))
         self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)
         self.refresh_button = ttk.Button(
-            top_bar, text="Refresh models", command=self.refresh_models
+            top_bar, text=tr("Refresh models"), command=self.refresh_models
         )
         self.refresh_button.pack(side=tk.LEFT)
         self.connection_button = ttk.Button(
-            top_bar, text="Connection...", command=self.open_connection_dialog
+            top_bar, text=tr("Connection..."), command=self.open_connection_dialog
         )
         self.connection_button.pack(side=tk.LEFT, padx=(6, 0))
 
@@ -295,7 +368,7 @@ class EditorApp:
         self.editor_frame.pack(fill=tk.BOTH, expand=True)
         editor_heading = ttk.Label(
             self.editor_frame,
-            text="Text to improve",
+            text=tr("Text to improve"),
             style="Title.TLabel",
         )
         editor_heading.grid(row=0, column=0, sticky="w", pady=(0, 6))
@@ -308,13 +381,13 @@ class EditorApp:
 
         editor_meta = ttk.Frame(self.editor_frame)
         editor_meta.grid(row=2, column=0, sticky="ew", pady=(4, 0))
-        self.count_var = tk.StringVar(value="0 words · 0 characters")
+        self.count_var = tk.StringVar(value=tr("{words} words · {count} characters", words=0, count=0))
         ttk.Label(editor_meta, textvariable=self.count_var).pack(side=tk.RIGHT)
 
-        controls = ttk.LabelFrame(self.editor_frame, text="Editing request", padding=7)
+        controls = ttk.LabelFrame(self.editor_frame, text=tr("Editing request"), padding=7)
         controls.grid(row=3, column=0, sticky="ew", pady=(7, 0))
-        ttk.Label(controls, text="Editing mode:").grid(row=0, column=0, sticky="w")
-        self.mode_var = tk.StringVar(value="Grammar")
+        ttk.Label(controls, text=tr("Editing mode:")).grid(row=0, column=0, sticky="w")
+        self.mode_var = tk.StringVar(value=tr(MODE_LABELS["Grammar"]))
         self.mode_combo = ttk.Combobox(
             controls,
             textvariable=self.mode_var,
@@ -326,29 +399,29 @@ class EditorApp:
         self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_selected)
         self.review_button = ttk.Button(
             controls,
-            text="Review changes",
+            text=tr("Review changes"),
             style="Primary.TButton",
             command=self.start_review,
         )
         self.review_button.grid(row=0, column=2, padx=(8, 4))
         self.undo_button = ttk.Button(
             controls,
-            text="Undo applied review",
+            text=tr("Undo applied review"),
             command=self.undo_applied_review,
             state=tk.DISABLED,
         )
         self.undo_button.grid(row=0, column=3, padx=4)
         self.explain_var = tk.BooleanVar(value=self.settings.quick_explanations)
         ttk.Checkbutton(
-            controls, text="Explain changes", variable=self.explain_var, command=self._on_explain_toggled
+            controls, text=tr("Explain changes"), variable=self.explain_var, command=self._on_explain_toggled
         ).grid(row=0, column=4, padx=(10, 4), sticky="w")
         controls.columnconfigure(4, weight=1)
         self.save_preset_button = ttk.Button(
-            controls, text="Save preset...", command=self.save_custom_preset
+            controls, text=tr("Save preset..."), command=self.save_custom_preset
         )
         self.save_preset_button.grid(row=0, column=5, padx=4)
         self.save_preset_button.grid_remove()  # shown once a Custom instruction was entered
-        ttk.Button(controls, text="Modes...", command=self.open_mode_dialog).grid(row=0, column=6)
+        ttk.Button(controls, text=tr("Modes..."), command=self.open_mode_dialog).grid(row=0, column=6)
         self.mode_description_var = tk.StringVar(value=PROMPTS["Grammar"])
         ttk.Label(
             controls,
@@ -370,17 +443,17 @@ class EditorApp:
         self.progress = ttk.Progressbar(bottom, mode="indeterminate", length=160)
         self.progress.pack(side=tk.LEFT)
         self.cancel_button = ttk.Button(
-            bottom, text="Cancel", command=self.cancel_generation, state=tk.DISABLED
+            bottom, text=tr("Cancel"), command=self.cancel_generation, state=tk.DISABLED
         )
         self.cancel_button.pack(side=tk.LEFT, padx=6)
         self.status_var = tk.StringVar(
-            value="Paste text, choose an editing mode, then review suggestions."
+            value=tr("Paste text, choose an editing mode, then review suggestions.")
         )
         self.status_label = ttk.Label(bottom, textvariable=self.status_var, anchor="w", style="Status.TLabel")
         self.status_label.pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=6
         )
-        ttk.Button(bottom, text="Quit", command=self.close).pack(side=tk.RIGHT)
+        ttk.Button(bottom, text=tr("Quit"), command=self.close).pack(side=tk.RIGHT)
         self.usage_var = tk.StringVar(value="")
         self.usage_label = ttk.Label(bottom, textvariable=self.usage_var, anchor="e", style="Status.TLabel")
         self.usage_label.pack(side=tk.RIGHT, padx=(6, 12))
@@ -407,6 +480,12 @@ class EditorApp:
         self.root.bind_all("<Alt-Right>", self._next_shortcut)
         self.root.bind_all("<Alt-Up>", self._up_shortcut)
         self.root.bind_all("<Alt-Down>", self._down_shortcut)
+        for sequence in ("<Control-equal>", "<Control-plus>", "<Control-KP_Add>"):
+            self.root.bind_all(sequence, lambda event: self.zoom(1))
+        for sequence in ("<Control-minus>", "<Control-underscore>", "<Control-KP_Subtract>"):
+            self.root.bind_all(sequence, lambda event: self.zoom(-1))
+        for sequence in ("<Control-Key-0>", "<Control-KP_0>"):
+            self.root.bind_all(sequence, lambda event: self.zoom(0))
 
     def _in_review(self):
         return bool(self.current_session)
@@ -586,51 +665,66 @@ class EditorApp:
         text = self.text_area.get("1.0", "end-1c")
         words = len(re.findall(r"\S+", text))
         self.count_var.set(
-            "{0} words · {1} characters".format(words, len(text))
+            tr("{words} words · {count} characters", words=format_number(words), count=format_number(len(text)))
         )
 
     # ------------------------------------------------------------- modes
+    @staticmethod
+    def mode_label(mode):
+        """The translated display name of a built-in mode (custom modes and chains keep their own name)."""
+        label = MODE_LABELS.get(mode)
+        return tr(label) if label else mode
+
     def _mode_values(self):
-        """Built-in modes, then the custom presets and chains under unselectable headings."""
-        values = list(EDITING_MODES)
+        """Built-in modes, then the custom presets and chains under unselectable headings (display names)."""
+        values = [self.mode_label(mode) for mode in EDITING_MODES]
         custom = self.settings.custom_mode_names()
         if custom:
-            values += [SEPARATOR_CUSTOM] + custom
+            values += [tr(SEPARATOR_CUSTOM)] + custom
         chains = self.settings.chain_names()
         if chains:
-            values += [SEPARATOR_CHAINS] + chains
+            values += [tr(SEPARATOR_CHAINS)] + chains
         return values
+
+    def _mode_key(self, label=None):
+        """The mode identifier (PROMPTS key, custom mode or chain name) behind a display name."""
+        label = self.mode_var.get() if label is None else label
+        for mode in EDITING_MODES:
+            if self.mode_label(mode) == label:
+                return mode
+        return label
 
     def _refresh_mode_values(self, select=None):
         values = self._mode_values()
         self.mode_combo.configure(values=values)
+        select = self.mode_label(select) if select else None
         if select in values:
             self.mode_var.set(select)
         elif self.mode_var.get() not in values:
-            self.mode_var.set("Grammar")
+            self.mode_var.set(self.mode_label("Grammar"))
         self._previous_mode = self.mode_var.get()
         self._update_mode_description()
 
     def _on_mode_selected(self, event=None):
         mode = self.mode_var.get()
-        if mode in (SEPARATOR_CUSTOM, SEPARATOR_CHAINS):
+        if mode in (tr(SEPARATOR_CUSTOM), tr(SEPARATOR_CHAINS)):
             self.mode_var.set(self._previous_mode)  # headings cannot be chosen
             return
         self._previous_mode = mode
         self._update_mode_description()
 
     def _update_mode_description(self, event=None):
-        mode = self.mode_var.get()
+        mode = self._mode_key()
         descriptions = {
-            "Translate": "Translate the complete text into a language you choose.",
-            "Custom": "Enter a custom editing instruction before generation.",
+            "Translate": tr("Translate the complete text into a language you choose."),
+            "Custom": tr("Enter a custom editing instruction before generation."),
         }
         if mode in descriptions or mode in PROMPTS:
             self.mode_description_var.set(descriptions.get(mode, PROMPTS.get(mode, "")))
             return
         steps = self.settings.find_chain(mode)
         if steps is not None:
-            self.mode_description_var.set("Chain: {0}".format(describe_chain(steps)))
+            self.mode_description_var.set(tr("Chain: {steps}", steps=describe_chain(steps)))
             return
         self.mode_description_var.set(build_instruction(mode, custom_modes=self.settings.custom_modes)
                                       if mode in self.settings.custom_mode_names() else "")
@@ -644,17 +738,17 @@ class EditorApp:
         instruction = self.last_custom_instruction.strip()
         if not instruction:
             return
-        name = simpledialog.askstring("Save as preset", "Name for this instruction:", parent=self.root)
+        name = simpledialog.askstring(tr("Save as preset"), tr("Name for this instruction:"), parent=self.root)
         if not name or not name.strip():
             return
         modes, problems = validate_custom_modes(self.settings.custom_modes + [{"name": name, "instruction": instruction}])
         if problems:
-            messagebox.showerror("Cannot save preset", "\n".join(problems))
+            messagebox.showerror(tr("Cannot save preset"), "\n".join(problems))
             return
         self.settings.custom_modes = modes
         self._save_settings()
         self._refresh_mode_values(select=modes[-1]["name"])
-        self.set_status("Preset \u201c{0}\u201d saved.".format(modes[-1]["name"]))
+        self.set_status(tr("Preset “{name}” saved.", name=modes[-1]["name"]))
 
     def open_mode_dialog(self):
         ManageModesDialog(self.root, self.settings.custom_modes, self.settings.chains, on_save=self._apply_modes)
@@ -664,7 +758,7 @@ class EditorApp:
         self.settings.chains = chains
         self._save_settings()
         self._refresh_mode_values()
-        self.set_status("{0} custom mode(s) and {1} chain(s) saved.".format(len(modes), len(chains)))
+        self.set_status(tr("{count} custom mode(s) and {count2} chain(s) saved.", count=len(modes), count2=len(chains)))
 
     def set_status(self, message):
         self.status_var.set(message)
@@ -673,24 +767,28 @@ class EditorApp:
         """Add one request's token counts to the session total shown in the status bar."""
         add_usage(self.session_usage, record)
         totals = self.session_usage
-        self.usage_var.set("Session: {0}".format(format_usage(totals)))
-        self.usage_tooltip.text = (
+        self.usage_var.set(tr("Session: {usage}", usage=format_usage(totals)))
+        self.usage_tooltip.text = tr(
             "Tokens used since the app started (every request in quick edit and automatic review)\n"
-            "Prompt tokens: {0:,}\nCompletion tokens: {1:,}\nRequests: {2}\nModel time: {3}\n"
-            "Last request: {4:,} in, {5:,} out ({6})"
-        ).format(
-            totals["prompt_tokens"], totals["completion_tokens"], totals["requests"],
-            _format_duration(totals["seconds"]), record.prompt_tokens, record.completion_tokens,
-            record.model or "?",
+            "Prompt tokens: {prompt_tokens}\nCompletion tokens: {completion_tokens}\nRequests: {requests}\n"
+            "Model time: {model_time}\nLast request: {last_in} in, {last_out} out ({model})",
+            prompt_tokens=format_number(totals["prompt_tokens"]), completion_tokens=format_number(totals["completion_tokens"]),
+            requests=totals["requests"], model_time=_format_duration(totals["seconds"]),
+            last_in=format_number(record.prompt_tokens), last_out=format_number(record.completion_tokens),
+            model=record.model or "?",
         )
 
     def _set_connection(self, message, color):
-        self.connection_var.set(message)
+        """Show the connection state in the header: a glyph and the message, coloured by state."""
+        self._connection = (message, color)
+        self.connection_var.set("{0} {1}".format(CONNECTION_GLYPHS.get(color, ""), message).strip())
         header_colors = {
             COLOR_OK: "#7ee2a8",
             COLOR_WARN: "#ffd27a",
             COLOR_ERROR: "#ff9b8f",
         }
+        if PALETTE["header"] == "#000000":  # high contrast: brighter tints on black
+            header_colors = {COLOR_OK: "#9dffc4", COLOR_WARN: "#ffe08a", COLOR_ERROR: "#ffb3a7"}
         self.connection_label.configure(foreground=header_colors.get(color, PALETTE["header_muted"]))
 
     # ------------------------------------------------------- backend switching
@@ -701,16 +799,16 @@ class EditorApp:
 
     def _backend_choices(self):
         """The backend combobox entries: ``[(label, backend, profile name or None)]``."""
-        choices = [(BACKEND_LABELS[BACKEND_OLLAMA], BACKEND_OLLAMA, None)]
+        choices = [(tr(BACKEND_LABELS[BACKEND_OLLAMA]), BACKEND_OLLAMA, None)]
         for name in self.settings.profile_names():
-            choices.append(("Remote: {0}".format(name), BACKEND_REMOTE, name))
+            choices.append((tr("Remote: {name}", name=name), BACKEND_REMOTE, name))
         return choices
 
     def _backend_label(self, backend=None, profile=None):
         backend = backend or self.settings.backend
         if backend == BACKEND_REMOTE:
-            return "Remote: {0}".format(profile or self.settings.active_profile)
-        return BACKEND_LABELS[BACKEND_OLLAMA]
+            return tr("Remote: {name}", name=profile or self.settings.active_profile)
+        return tr(BACKEND_LABELS[BACKEND_OLLAMA])
 
     def _refresh_backend_values(self):
         """List Local Ollama plus one "Remote: <profile>" entry per relay profile."""
@@ -741,8 +839,8 @@ class EditorApp:
         self.model_combo.configure(values=(self.model_var.get(),) if self.model_var.get() else ())
         self._save_settings()
         if backend == BACKEND_REMOTE and not self.settings.remote_configured:
-            self._set_connection("Not configured", COLOR_WARN)
-            self.set_status("Choose Connection... to enter the relay address and API key.")
+            self._set_connection(tr("Not configured"), COLOR_WARN)
+            self.set_status(tr("Choose Connection... to enter the relay address and API key."))
             return
         self.refresh_models()
 
@@ -773,11 +871,11 @@ class EditorApp:
         service = self.service
         backend = self.settings.backend
         if backend == BACKEND_REMOTE and not self.settings.remote_configured:
-            self._set_connection("Not configured", COLOR_WARN)
-            self.set_status("Choose Connection... to enter the relay address and API key.")
+            self._set_connection(tr("Not configured"), COLOR_WARN)
+            self.set_status(tr("Choose Connection... to enter the relay address and API key."))
             return
         self.refresh_button.configure(state=tk.DISABLED)
-        self._set_connection("Checking {0}...".format(service.display_name), COLOR_NEUTRAL)
+        self._set_connection(tr("Checking {backend}...", backend=tr(service.display_name)), COLOR_NEUTRAL)
 
         def worker():
             try:
@@ -796,7 +894,7 @@ class EditorApp:
         self.model_combo.configure(values=models)
         if not models:
             self.model_var.set("")
-            self._set_connection("Model missing", COLOR_WARN)
+            self._set_connection(tr("Model missing"), COLOR_WARN)
             self.set_status(self.service.no_models_hint())
             return
         preferred = self.settings.preferred_model(backend) or self.model_var.get()
@@ -804,14 +902,10 @@ class EditorApp:
         self.model_var.set(chosen)
         self.settings.remember_model(backend, chosen)
         self._save_settings()
-        self._set_connection(summary or "Connected", COLOR_OK)
+        self._set_connection(summary or tr("Connected"), COLOR_OK)
         self.set_status(
-            "{0} ready with {1} model{2}. Paste text, choose an editing mode, then "
-            "review suggestions.".format(
-                self.service.display_name.capitalize(),
-                len(models),
-                "" if len(models) == 1 else "s",
-            )
+            tr("{backend} ready with {count} model(s). Paste text, choose an editing mode, then review suggestions.",
+               backend=tr(self.service.display_name).capitalize(), count=len(models))
         )
 
     def _handle_model_error(self, backend, error):
@@ -819,23 +913,23 @@ class EditorApp:
         if backend != self.settings.backend:
             return
         self.model_combo.configure(values=())
-        self._set_connection("Unavailable", COLOR_ERROR)
-        self.set_status(str(error))
+        self._set_connection(tr("Unavailable"), COLOR_ERROR)
+        self.set_status(tr("The model list could not be fetched: {error}", error=error))
 
     # -------------------------------------------------------------- generation
     def _get_instruction(self):
         """Return the ``(name, instruction)`` steps for the chosen mode, or None when the user backed out."""
-        mode = self.mode_var.get()
+        mode = self._mode_key()
         if mode == "Translate":
             language = simpledialog.askstring(
-                "Translate", "Target language:", parent=self.root
+                tr("Translate"), tr("Target language:"), parent=self.root
             )
             if not language or not language.strip():
                 return None
             return [(mode, build_instruction(mode, language.strip()))]
         if mode == "Custom":
             custom = simpledialog.askstring(
-                "Custom instruction", "Editing instruction:", parent=self.root,
+                tr("Custom instruction"), tr("Editing instruction:"), parent=self.root,
                 initialvalue=self.last_custom_instruction or None,
             )
             if not custom or not custom.strip():
@@ -848,12 +942,12 @@ class EditorApp:
             try:
                 return list(zip(steps, build_chain(steps, self.settings.custom_modes)))
             except ValueError as exc:
-                messagebox.showerror("Chain not usable", str(exc))
+                messagebox.showerror(tr("Chain not usable"), tr("This chain cannot be run: {error}", error=exc))
                 return None
         try:
             return [(mode, build_instruction(mode, custom_modes=self.settings.custom_modes))]
         except ValueError as exc:
-            messagebox.showerror("Unknown mode", str(exc))
+            messagebox.showerror(tr("Unknown mode"), tr("This mode cannot be run: {error}", error=exc))
             return None
 
     @staticmethod
@@ -861,7 +955,7 @@ class EditorApp:
         """What the scratchpad and review record as the instruction."""
         if len(steps) == 1:
             return steps[0][1]
-        return "Chain \u201c{0}\u201d: {1}".format(mode, describe_chain(name for name, _ in steps))
+        return "Chain \u201c{0}\u201d: {1}".format(mode, describe_chain(name for name, _ in steps))  # recorded, English
 
     def _current_selection(self, full_text):
         """The editor selection as ``(start, end)`` character offsets, or None."""
@@ -881,22 +975,21 @@ class EditorApp:
         source = full_text[selection[0]:selection[1]] if selection else full_text
         if not source.strip():
             if selection:
-                messagebox.showinfo("TextEnhanceAI", "The selected passage contains no text. Select text or clear the selection.")
+                messagebox.showinfo("TextEnhanceAI", tr("The selected passage contains no text. Select text or clear the selection."))
             else:
-                messagebox.showinfo("TextEnhanceAI", "Enter or paste text to edit.")
+                messagebox.showinfo("TextEnhanceAI", tr("Enter or paste text to edit."))
             return
         model = self.model_var.get().strip()
         if not model:
             messagebox.showerror(
-                "Model missing",
-                "No model is available on the selected backend. "
-                + self.service.no_models_hint(),
+                tr("Model missing"),
+                tr("No model is available on the selected backend.") + " " + self.service.no_models_hint(),
             )
             return
         steps = self._get_instruction()
         if steps is None:
             return
-        mode = self.mode_var.get()
+        mode = self._mode_key()
         description = self._describe_steps(mode, steps)
         explain = bool(self.explain_var.get())
         # what the explanation prompt quotes as the instruction (every step of a chain)
@@ -910,12 +1003,12 @@ class EditorApp:
         self.cancel_event = threading.Event()
         self.generating = True
         self.generation_started_at = time.time()
-        self.generation_label = "{0} via {1}".format(model, service.display_name)
-        scope = " \u00b7 selection ({0} words)".format(len(re.findall(r"\S+", source))) if selection else ""
+        self.generation_label = tr("{model} via {backend}", model=model, backend=tr(service.display_name))
+        scope = tr(" · selection ({count} words)", count=len(re.findall(r"\S+", source))) if selection else ""
         if selection:
-            self.generation_verb = "Editing selection ({0} words)".format(len(re.findall(r"\S+", source)))
+            self.generation_verb = tr("Editing selection ({count} words)", count=len(re.findall(r"\S+", source)))
         else:
-            self.generation_verb = "Generating review"
+            self.generation_verb = tr("Generating review")
         self._progress_chars = 0
         self._set_generating_state(True)
         cancel_event = self.cancel_event
@@ -926,7 +1019,8 @@ class EditorApp:
         def on_step(index, total, name):
             self._progress_chars = 0
             if total > 1:
-                self.generation_verb = "Step {0}/{1}: {2}{3}".format(index, total, name, scope)
+                self.generation_verb = tr("Step {index}/{total}: {name}{scope}", index=index, total=total,
+                                          name=self.mode_label(name), scope=scope)
 
         def on_usage(record):
             self.events.put(("usage", record))
@@ -948,7 +1042,7 @@ class EditorApp:
                 )
                 session.steps = chain.steps
                 if explain and session.review_items:
-                    self.generation_verb = "Explaining changes"
+                    self.generation_verb = tr("Explaining changes")
                     self._progress_chars = 0
                     try:
                         explain_session(service, model, session, explain_instruction, cancel_event, on_usage=on_usage)
@@ -976,7 +1070,7 @@ class EditorApp:
             self.progress.pack(side=tk.LEFT, before=self.status_label)
             self.cancel_button.pack(side=tk.LEFT, padx=6, before=self.status_label)
             self.progress.start(12)
-            self.set_status("{0} with {1}...".format(self.generation_verb, self.generation_label))
+            self.set_status(tr("{verb} with {target}...", verb=self.generation_verb, target=self.generation_label))
         else:
             self.progress.stop()
             self.progress.pack_forget()
@@ -986,7 +1080,7 @@ class EditorApp:
         if self.generating and self.cancel_event:
             self.cancel_event.set()
             self.cancel_button.configure(state=tk.DISABLED)
-            self.set_status("Cancelling generation...")
+            self.set_status(tr("Cancelling generation..."))
 
     def _finish_generation(self):
         self._set_generating_state(False)
@@ -1001,7 +1095,7 @@ class EditorApp:
         self._finish_generation()
         if revision_id != self.revision_id:
             self.set_status(
-                "The text changed; the stale result from {0} was discarded.".format(model)
+                tr("The text changed; the stale result from {model} was discarded.", model=model)
             )
             return
 
@@ -1010,8 +1104,8 @@ class EditorApp:
         if not session.review_items:
             self.current_logger.log_outcome(session, "no changes", session.original_text)
             self.current_logger = None
-            self.set_status("{0} did not suggest any changes.".format(model))
-            messagebox.showinfo("Review complete", "No changes were suggested.")
+            self.set_status(tr("{model} did not suggest any changes.", model=model))
+            messagebox.showinfo(tr("Review complete"), tr("No changes were suggested."))
             return
 
         self.current_session = session
@@ -1024,18 +1118,18 @@ class EditorApp:
             return
         self._finish_generation()
         if isinstance(error, OutputTruncated):
-            title = "Response truncated"
+            title = tr("Response truncated")
         else:
-            title = "{0} error".format(self.service.display_name.capitalize())
-            self._set_connection("Unavailable", COLOR_ERROR)
+            title = tr("{backend} error", backend=tr(self.service.display_name).capitalize())
+            self._set_connection(tr("Unavailable"), COLOR_ERROR)
         self.set_status(str(error))
-        messagebox.showerror(title, str(error))
+        messagebox.showerror(title, tr("The request failed: {error}", error=error))
 
     def _handle_generation_cancelled(self, request_id):
         if request_id != self.active_request_id:
             return
         self._finish_generation()
-        self.set_status("Generation cancelled. Your text was not changed.")
+        self.set_status(tr("Generation cancelled. Your text was not changed."))
 
     def _poll_events(self):
         try:
@@ -1068,13 +1162,12 @@ class EditorApp:
             elapsed = int(time.time() - self.generation_started_at)
             received = self._progress_chars
             if received:
-                progress = " · {0} characters received".format(received)
+                progress = tr(" · {received} characters received", received=format_number(received))
             else:
-                progress = " · waiting for the first tokens"
+                progress = tr(" · waiting for the first tokens")
             self.set_status(
-                "{0} with {1}... {2}s elapsed{3}".format(
-                    self.generation_verb, self.generation_label, elapsed, progress
-                )
+                tr("{verb} with {target}... {elapsed}s elapsed{progress}", verb=self.generation_verb,
+                   target=self.generation_label, elapsed=elapsed, progress=progress)
             )
         try:
             self.root.after(100, self._poll_events)
@@ -1084,7 +1177,7 @@ class EditorApp:
     # ------------------------------------------------------------------ review
     def apply_review(self, session):
         if session.pending_count:
-            self.set_status("Review every pending change before applying.")
+            self.set_status(tr("Review every pending change before applying."))
             return
         final_text = render_reviewed_text(session)
         current = self.text_area.get("1.0", "end-1c")
@@ -1092,7 +1185,7 @@ class EditorApp:
         if session.selection:
             span = self._locate_selection(current, session)
             if span is None:
-                self.set_status("The editor text changed; the selected passage could not be found, so nothing was applied.")
+                self.set_status(tr("The editor text changed; the selected passage could not be found, so nothing was applied."))
                 return
         self.last_applied_source = current
         session.state = "applied"
@@ -1105,7 +1198,7 @@ class EditorApp:
         else:
             self._set_editor_text(final_text)
         self.undo_button.configure(state=tk.NORMAL)
-        self._leave_review("Reviewed changes applied.")
+        self._leave_review(tr("Reviewed changes applied."))
 
     @staticmethod
     def _locate_selection(current, session):
@@ -1129,7 +1222,7 @@ class EditorApp:
         session.state = "discarded"
         if self.current_logger:
             self.current_logger.log_outcome(session, "discarded", session.original_text)
-        self._leave_review("Review discarded. The original text was kept.")
+        self._leave_review(tr("Review discarded. The original text was kept."))
 
     def _leave_review(self, status):
         self.review_panel.pack_forget()
@@ -1158,15 +1251,15 @@ class EditorApp:
         self.last_applied_source = None
         self._set_editor_text(source)
         self.undo_button.configure(state=tk.DISABLED)
-        self.set_status("The last applied review was undone.")
+        self.set_status(tr("The last applied review was undone."))
 
     # ------------------------------------------------------------------- files
     def _confirm_discard(self):
         """Offer to save unsaved editor changes; False when the user cancels the action."""
         if not self.modified:
             return True
-        name = self.current_path.name if self.current_path else "Untitled"
-        answer = messagebox.askyesnocancel("Unsaved changes", "Save the changes to {0}?".format(name))
+        name = self.current_path.name if self.current_path else tr("Untitled")
+        answer = messagebox.askyesnocancel(tr("Unsaved changes"), tr("Save the changes to {name}?", name=name))
         if answer is None:
             return False
         if answer:
@@ -1180,13 +1273,13 @@ class EditorApp:
         if not self._confirm_discard():
             return False
         if path is None:
-            path = filedialog.askopenfilename(title="Open", filetypes=FILE_TYPES, parent=self.root)
+            path = filedialog.askopenfilename(title=tr("Open"), filetypes=file_types(), parent=self.root)
             if not path:
                 return False
         try:
             document = load_document(path)
         except (OSError, DocumentError) as exc:
-            messagebox.showerror("Cannot open file", str(exc))
+            messagebox.showerror(tr("Cannot open file"), tr("The file could not be opened: {error}", error=exc))
             self.settings.forget_file(path)
             self._rebuild_recent_menu()
             return False
@@ -1202,7 +1295,7 @@ class EditorApp:
         self._rebuild_recent_menu()
         if self.mode != MODE_QUICK:
             self.switch_mode(MODE_QUICK)
-        self.set_status("Opened {0}.".format(self.current_path))
+        self.set_status(tr("Opened {path}.", path=self.current_path))
         self.text_area.focus_set()
         return True
 
@@ -1220,7 +1313,7 @@ class EditorApp:
         kind = self.current_document.kind if self.current_document else "txt"
         suffix = KIND_SUFFIXES.get(kind, ".txt")
         path = filedialog.asksaveasfilename(
-            title="Save As", defaultextension=suffix, filetypes=FILE_TYPES, parent=self.root,
+            title=tr("Save As"), defaultextension=suffix, filetypes=file_types(), parent=self.root,
             initialfile=self.current_path.name if self.current_path else "",
             initialdir=str(self.current_path.parent) if self.current_path else None,
         )
@@ -1235,7 +1328,7 @@ class EditorApp:
         try:
             save_document(document, text, path, warnings.append)
         except (OSError, DocumentError) as exc:
-            messagebox.showerror("Cannot save file", str(exc))
+            messagebox.showerror(tr("Cannot save file"), tr("The file could not be saved: {error}", error=exc))
             return False
         self.current_path = Path(path)
         try:
@@ -1247,10 +1340,10 @@ class EditorApp:
         self.settings.remember_file(self.current_path)
         self._save_settings()
         self._rebuild_recent_menu()
-        message = "Saved {0}.".format(self.current_path)
+        message = tr("Saved {path}.", path=self.current_path)
         if warnings:
             message += " " + " ".join(warnings) + "."
-            messagebox.showwarning("Saved with limitations", "\n".join(warnings))
+            messagebox.showwarning(tr("Saved with limitations"), "\n".join(warnings))
         self.set_status(message)
         return True
 
@@ -1259,17 +1352,18 @@ class EditorApp:
         if self.generating:
             return
         if self.current_session:
-            messagebox.showinfo("Review in progress", "Apply or discard the current review first.")
+            messagebox.showinfo(tr("Review in progress"), tr("Apply or discard the current review first."))
             return
         if not self.text_area.get("1.0", "end-1c").strip():
-            messagebox.showinfo("TextEnhanceAI", "Enter or open text first.")
+            messagebox.showinfo("TextEnhanceAI", tr("Enter or open text first."))
             return
         if self.current_path is None or self.modified:
-            if not messagebox.askyesno(
-                "Save first?",
-                "The automatic review works on files. Save the text {0} now?".format(
-                    "to a file" if self.current_path is None else "to {0}".format(self.current_path.name)),
-            ):
+            if self.current_path is None:
+                question = tr("The automatic review works on files. Save the text to a file now?")
+            else:
+                question = tr("The automatic review works on files. Save the text to {name} now?",
+                              name=self.current_path.name)
+            if not messagebox.askyesno(tr("Save first?"), question):
                 return
             if not self.save_file():
                 return
@@ -1277,12 +1371,12 @@ class EditorApp:
         self.switch_mode(MODE_AUTO)
         if self.workflow_screen.active:
             messagebox.showinfo(
-                "Review project open",
-                "Close the current review project to start a new one with {0}.".format(path.name),
+                tr("Review project open"),
+                tr("Close the current review project to start a new one with {name}.", name=path.name),
             )
             return
         self.workflow_screen.start_view.set_file(str(path))
-        self.set_status("{0} is ready for the automatic review; check the options and start.".format(path.name))
+        self.set_status(tr("{name} is ready for the automatic review; check the options and start.", name=path.name))
 
     def close(self):
         if not self._confirm_discard():

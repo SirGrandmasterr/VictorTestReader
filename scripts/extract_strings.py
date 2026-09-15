@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """List UI source strings that have no translation in a locale file.
 
-Scans ``ui/`` for ``tr("...")`` calls (the string must be a literal, adjacent
-literals count as one) and prints every source string missing from
-``locales/<code>.json``. Exit status is 1 when something is missing, so the
-script doubles as a check.
+Scans ``ui/`` for ``tr("...")`` and ``N_("...")`` calls (the string must be
+a literal, adjacent literals count as one), adds the English label tables of
+``core/`` that the screens show (``ui.i18n.core_source_strings``) and prints
+every source string missing from ``locales/<code>.json``. Exit status is 1
+when something is missing, so the script doubles as a check.
 
     python scripts/extract_strings.py            # against locales/de.json
     python scripts/extract_strings.py fr         # against locales/fr.json
@@ -23,8 +24,11 @@ UI_DIR = ROOT / "ui"
 LOCALES_DIR = ROOT / "locales"
 
 
+MARKERS = ("tr", "N_")  # N_ marks constants that are tr()'d where they are shown
+
+
 def source_strings(path):
-    """Return the literal first arguments of ``tr(...)`` calls in one Python file."""
+    """Return the literal first arguments of ``tr(...)`` / ``N_(...)`` calls in one Python file."""
     tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(path))
     found = []
     for node in ast.walk(tree):
@@ -32,7 +36,7 @@ def source_strings(path):
             continue
         func = node.func
         name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-        if name != "tr":
+        if name not in MARKERS:
             continue
         first = node.args[0]
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
@@ -40,11 +44,23 @@ def source_strings(path):
     return found
 
 
-def collect_source_strings(directory=UI_DIR):
-    """Return the sorted set of source strings used by every ``tr()`` call under ``directory``."""
+def collect_source_strings(directory=UI_DIR, include_core=None):
+    """Return the sorted set of source strings used by every ``tr()`` / ``N_()`` call under ``directory``.
+
+    ``include_core`` (default: only for the real ``ui/`` directory) adds the
+    English label tables of ``core/`` that the screens translate at render time.
+    """
     strings = set()
     for path in sorted(Path(directory).rglob("*.py")):
         strings.update(source_strings(path))
+    if include_core is None:
+        include_core = Path(directory).resolve() == UI_DIR.resolve()
+    if include_core:
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from ui.i18n import core_source_strings
+
+        strings.update(core_source_strings())
     return sorted(strings)
 
 
