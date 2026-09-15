@@ -29,13 +29,14 @@ class ChainResult:
         return self.steps[-1].output if self.steps else ""
 
 
-def run_chain(service, model, steps, text, cancel_event, on_step=None, on_progress=None):
+def run_chain(service, model, steps, text, cancel_event, on_step=None, on_progress=None, on_usage=None):
     """Run editing ``steps`` one after another, each editing the previous step's output.
 
     ``steps`` is a list of ``(name, instruction)`` pairs (plain instruction
     strings work too). ``on_step(index, total, name)`` is called before each
-    step (1-based). Cancellation is honoured between steps as well as inside
-    a step: ``EditCancelled`` is raised as soon as ``cancel_event`` is set.
+    step (1-based). ``on_usage`` receives the token counts of every step's
+    request. Cancellation is honoured between steps as well as inside a
+    step: ``EditCancelled`` is raised as soon as ``cancel_event`` is set.
     Returns a ``ChainResult``.
     """
     result = ChainResult()
@@ -47,7 +48,9 @@ def run_chain(service, model, steps, text, cancel_event, on_step=None, on_progre
             raise EditCancelled("Editing was cancelled.")
         if on_step:
             on_step(index, total, name)
-        current = service.stream_edit(model, instruction, current, cancel_event, on_progress=on_progress)
+        current = service.stream_edit(
+            model, instruction, current, cancel_event, on_progress=on_progress, on_usage=on_usage
+        )
         result.steps.append(ChainStep(name, instruction, current))
     return result
 
@@ -94,7 +97,7 @@ def session_hunks(session):
     return result
 
 
-def explain_session(service, model, session, instruction, cancel_event, language=SAME_LANGUAGE):
+def explain_session(service, model, session, instruction, cancel_event, language=SAME_LANGUAGE, on_usage=None):
     """Fill ``ChangeHunk.explanation`` for every change of a quick-editor session.
 
     Trivial changes get the canned sentences the manuscript review uses; the
@@ -107,7 +110,8 @@ def explain_session(service, model, session, instruction, cancel_event, language
     remaining = apply_canned_explanations(session.original_text, hunks, language)
     if remaining:
         numbered = request_explanations(
-            service, model, [(session.original_text, remaining)], instruction, cancel_event, language
+            service, model, [(session.original_text, remaining)], instruction, cancel_event, language,
+            on_usage=on_usage,
         )
         distribute_explanations(remaining, numbered)
     return sum(1 for hunk in hunks if hunk.explanation)

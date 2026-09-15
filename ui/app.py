@@ -8,7 +8,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
-from core.backend import EditCancelled, OutputTruncated
+from core.backend import EditCancelled, OutputTruncated, add_usage, empty_usage, format_usage
 from core.diff_engine import build_edit_session, render_reviewed_text
 from core.documents import (
     FORMATTED_KINDS,
@@ -37,7 +37,7 @@ from .connection_dialog import ConnectionDialog
 from .i18n import current_language, resolve_language, set_language, tr
 from .mode_dialog import ManageModesDialog
 from .review_panel import ReviewPanel
-from .theme import PALETTE, apply_theme, font, style_text
+from .theme import PALETTE, Tooltip, apply_theme, font, style_text
 from .workflow_screen import WorkflowScreen
 
 COLOR_OK = PALETTE["success"]
@@ -56,6 +56,15 @@ FILE_TYPES = [
     ("OpenDocument text", "*.odt"),
     ("All files", "*.*"),
 ]
+
+
+def _format_duration(seconds):
+    seconds = int(seconds or 0)
+    if seconds < 60:
+        return "{0} s".format(seconds)
+    if seconds < 3600:
+        return "{0} min {1:02d} s".format(seconds // 60, seconds % 60)
+    return "{0} h {1:02d} min".format(seconds // 3600, (seconds % 3600) // 60)
 
 
 def window_title(path, modified):
@@ -107,6 +116,7 @@ class EditorApp:
         self.current_path = None  # quick-editor file (Path) or None while untitled
         self.current_document = None  # documents.LoadedDocument the editor text came from
         self.modified = False
+        self.session_usage = empty_usage()  # token counts of every request since the app started
 
         self.root.title(APP_TITLE)
         self.root.geometry("1120x780")
@@ -322,6 +332,10 @@ class EditorApp:
             side=tk.LEFT, fill=tk.X, expand=True, padx=6
         )
         ttk.Button(bottom, text="Quit", command=self.close).pack(side=tk.RIGHT)
+        self.usage_var = tk.StringVar(value="")
+        self.usage_label = ttk.Label(bottom, textvariable=self.usage_var, anchor="e", style="Status.TLabel")
+        self.usage_label.pack(side=tk.RIGHT, padx=(6, 12))
+        self.usage_tooltip = Tooltip(self.usage_label, "")
         self.progress.pack_forget()
         self.cancel_button.pack_forget()
 
@@ -606,6 +620,21 @@ class EditorApp:
     def set_status(self, message):
         self.status_var.set(message)
 
+    def record_usage(self, record):
+        """Add one request's token counts to the session total shown in the status bar."""
+        add_usage(self.session_usage, record)
+        totals = self.session_usage
+        self.usage_var.set("Session: {0}".format(format_usage(totals)))
+        self.usage_tooltip.text = (
+            "Tokens used since the app started (every request in quick edit and automatic review)\n"
+            "Prompt tokens: {0:,}\nCompletion tokens: {1:,}\nRequests: {2}\nModel time: {3}\n"
+            "Last request: {4:,} in, {5:,} out ({6})"
+        ).format(
+            totals["prompt_tokens"], totals["completion_tokens"], totals["requests"],
+            _format_duration(totals["seconds"]), record.prompt_tokens, record.completion_tokens,
+            record.model or "?",
+        )
+
     def _set_connection(self, message, color):
         self.connection_var.set(message)
         header_colors = {
@@ -826,10 +855,14 @@ class EditorApp:
             if total > 1:
                 self.generation_verb = "Step {0}/{1}: {2}{3}".format(index, total, name, scope)
 
+        def on_usage(record):
+            self.events.put(("usage", record))
+
         def worker():
             try:
                 chain = run_chain(
-                    service, model, steps, source, cancel_event, on_step=on_step, on_progress=on_progress
+                    service, model, steps, source, cancel_event, on_step=on_step, on_progress=on_progress,
+                    on_usage=on_usage,
                 )
                 session = build_edit_session(
                     source,
@@ -845,7 +878,7 @@ class EditorApp:
                     self.generation_verb = "Explaining changes"
                     self._progress_chars = 0
                     try:
-                        explain_session(service, model, session, explain_instruction, cancel_event)
+                        explain_session(service, model, session, explain_instruction, cancel_event, on_usage=on_usage)
                     except EditCancelled:
                         pass  # the edit itself is done: open the review without explanations
                     except Exception:
@@ -946,7 +979,12 @@ class EditorApp:
                     self._handle_generation_error(event[1], event[2])
                 elif kind == "generation_cancelled":
                     self._handle_generation_cancelled(event[1])
-                elif kind.startswith("workflow_"):
+                elif kind == "usage":
+                    self.record_usage(event[1])
+                elif kind == "workflow_usage":
+                    self.workflow_screen.handle_event(event)  # adds to the project total
+                    self.record_usage(event[1])
+                elif kind.startswith(("workflow_", "consistency_")):
                     self.workflow_screen.handle_event(event)
         except queue.Empty:
             pass

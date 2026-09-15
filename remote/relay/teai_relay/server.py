@@ -167,30 +167,36 @@ async def _read_json_body(request, config):
 
 
 async def _wait_for_slot(agent, sse, config, request_id):
-    """Poll until the agent has a free slot, sending keepalives while queued."""
+    """Poll until the agent has a free slot, sending keepalives while queued.
+
+    The wait is counted in ``agent.queued`` so ``/status`` shows the queue depth.
+    """
+    if agent.has_capacity:
+        return
     loop = asyncio.get_running_loop()
     deadline = loop.time() + config.queue_timeout
     next_keepalive = loop.time() + config.keepalive_interval
-    announced = False
-    while not agent.has_capacity:
-        if agent.closed:
-            raise RequestOutcome(502, "The GPU agent disconnected while the request was queued.", "agent_error")
-        now = loop.time()
-        if now >= deadline:
-            raise RequestOutcome(
-                503,
-                "The GPU is busy and the request timed out in the queue after {0:.0f}s.".format(
-                    config.queue_timeout
-                ),
-                "server_busy",
-            )
-        if not announced:
-            log.info("request %s queued behind %d on agent %s", request_id, agent.load, agent.name)
-            announced = True
-        if sse is not None and now >= next_keepalive:
-            await sse.comment("queued")
-            next_keepalive = now + config.keepalive_interval
-        await asyncio.sleep(0.25)
+    log.info("request %s queued behind %d on agent %s", request_id, agent.load, agent.name)
+    agent.queued += 1
+    try:
+        while not agent.has_capacity:
+            if agent.closed:
+                raise RequestOutcome(502, "The GPU agent disconnected while the request was queued.", "agent_error")
+            now = loop.time()
+            if now >= deadline:
+                raise RequestOutcome(
+                    503,
+                    "The GPU is busy and the request timed out in the queue after {0:.0f}s.".format(
+                        config.queue_timeout
+                    ),
+                    "server_busy",
+                )
+            if sse is not None and now >= next_keepalive:
+                await sse.comment("queued")
+                next_keepalive = now + config.keepalive_interval
+            await asyncio.sleep(0.25)
+    finally:
+        agent.queued -= 1
 
 
 async def proxy_request(request, path):

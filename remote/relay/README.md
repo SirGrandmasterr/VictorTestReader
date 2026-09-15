@@ -90,7 +90,7 @@ Keys must be at least 16 characters; agent and client keys must differ.
 | GET    | `/v1/models`            | client key  | Models offered by ready agents         |
 | POST   | `/v1/chat/completions`  | client key  | Chat completion (streaming or JSON)    |
 | POST   | `/v1/completions`       | client key  | Legacy completion                      |
-| GET    | `/status`               | client key  | Agents, load, counters                 |
+| GET    | `/status`               | client key  | Agents, load, queue depth, chunks/s, counters |
 | GET    | `/agent/ws`             | agent key   | WebSocket for GPU agents               |
 
 Example:

@@ -24,6 +24,7 @@ from core.consistency import (
 )
 from core.documents import FORMATTING_NOTE, KIND_LABELS, MANUSCRIPT_PATTERNS, DocumentError, load_document
 from core.models import ACCEPTED, PENDING, REJECTED
+from core.remote_service import relay_throughput
 from core.statistics import project_statistics, statistics_markdown
 from core.workflow import (
     CHECK_AUTHOR,
@@ -108,6 +109,17 @@ def _flagged_note(stats):
 
 def _suppressed_note(stats):
     return " · {0} suppressed by glossary".format(stats["suppressed"]) if stats.get("suppressed") else ""
+
+
+RELAY_STATUS_INTERVAL_MS = 10000  # how often the relay's /status is polled while evaluating
+
+
+def _format_throughput(throughput):
+    """Progress-line suffix for a relay throughput summary (``relay_throughput``), or ""."""
+    if not throughput:
+        return ""
+    rate = throughput.get("chunks_per_s") or 0
+    return "GPU ≈ {0:.0f} chunks/s · {1} queued".format(rate, throughput.get("queued", 0))
 
 
 def _format_eta(seconds):
@@ -424,6 +436,7 @@ class WorkflowScreen(ttk.Frame):
         self.runner = None
         self.running_tasks = set()
         self._save_after = None
+        self._status_after = None  # pending relay status poll (after id)
         self.start_view = StartView(self, on_start=self.start_project, on_open=self.open_project)
         self.project_view = ProjectView(self, on_close=self.close_project, on_pause=self.toggle_pause,
                                         on_export=self.export_project, on_retry=self.resume_runner,
@@ -622,6 +635,7 @@ class WorkflowScreen(ttk.Frame):
                 )
             )
             self.project_view.update_progress(0, queued, 0, None)
+            self._schedule_status_poll(1000)
 
     def reevaluate(self, chapter_index, segment_index=None, checks=None):
         """Drop results of a segment (or chapter) and evaluate them again right away."""
@@ -763,6 +777,44 @@ class WorkflowScreen(ttk.Frame):
             message += "\n\nLimitations:\n- " + "\n- ".join(paths["warnings"])
         messagebox.showinfo("Export complete", message)
 
+    # -------------------------------------------------------- relay status
+    def _schedule_status_poll(self, delay=RELAY_STATUS_INTERVAL_MS):
+        self._cancel_status_poll()
+        self._status_after = self.after(delay, self._poll_relay_status)
+
+    def _cancel_status_poll(self):
+        if self._status_after is not None:
+            try:
+                self.after_cancel(self._status_after)
+            except tk.TclError:
+                pass
+            self._status_after = None
+
+    def _poll_relay_status(self):
+        """Fetch the relay's /status on a background thread while the runner is active.
+
+        Only the remote backend has a status document; with Ollama nothing is
+        shown. The answer arrives as ``("workflow_relay_status", status)``.
+        """
+        self._status_after = None
+        if not self.evaluating:
+            return
+        service = self.host.get_service()
+        fetch = getattr(service, "fetch_status", None)
+        if fetch is None or getattr(service, "backend_id", "") != "remote":
+            return
+        events = self.host.events
+
+        def worker():
+            try:
+                status = fetch()
+            except Exception:
+                status = None
+            events.put(("workflow_relay_status", status))
+
+        threading.Thread(target=worker, name="teai-relay-status", daemon=True).start()
+        self._schedule_status_poll()
+
     def close_project(self):
         if self.project is None:
             return
@@ -774,6 +826,7 @@ class WorkflowScreen(ttk.Frame):
             self.consistency_runner.cancel()
         self.consistency_runner = None
         self._save_now()
+        self._cancel_status_poll()
         self.project = None
         self.runner = None
         for dialog in (self.decision_dialog, self.statistics_dialog):
@@ -910,10 +963,19 @@ class WorkflowScreen(ttk.Frame):
             eta = self.runner.eta_seconds() if self.runner else None
             self.project_view.update_progress(done, total, running, eta)
             return True
+        if kind == "workflow_usage":
+            self.project.add_usage(event[1])
+            self.schedule_save()
+            return True
+        if kind == "workflow_relay_status":
+            self.project_view.set_throughput(relay_throughput(event[1]) if self.evaluating else None)
+            return True
         if kind == "workflow_finished":
             cancelled = event[1]
             if self.runner is not None and self.runner.has_work():
                 return True  # stale: tasks were enqueued after this batch of workers retired
+            self._cancel_status_poll()
+            self.project_view.set_throughput(None)
             self.project_view.set_running(False)
             self.host.lock_controls(False)
             self._save_now()
@@ -1496,6 +1558,8 @@ class ProjectView(ttk.Frame):
         self._chapter_after = None
         self._list_after = None
         self.listed = {}  # all-changes tab: row iid -> (chapter_index, segment_index, change_id)
+        self.throughput = None  # relay chunk rate / queue depth shown in the progress line, see set_throughput
+        self._last_progress = None  # (done, total, running, eta) of the last update_progress call
         self._build()
 
     # ---------------------------------------------------------------- build
@@ -2120,6 +2184,7 @@ class ProjectView(ttk.Frame):
         self.pause_button.configure(text="Pausing...", state=tk.DISABLED)
 
     def update_progress(self, done, total, running, eta):
+        self._last_progress = (done, total, running, eta)
         if total:
             self.progress.configure(value=100.0 * done / total)
         else:
@@ -2130,7 +2195,16 @@ class ProjectView(ttk.Frame):
         eta_text = _format_eta(eta)
         if eta_text and done < total:
             parts.append(eta_text)
+        throughput = _format_throughput(self.throughput)
+        if throughput:
+            parts.append(throughput)
         self.progress_var.set(" · ".join(parts))
+
+    def set_throughput(self, throughput):
+        """Show (or clear, with None) the relay's chunk rate and queue depth in the progress line."""
+        self.throughput = throughput
+        if self._last_progress is not None:
+            self.update_progress(*self._last_progress)
 
     def summary_text(self):
         stats = self.project.progress()

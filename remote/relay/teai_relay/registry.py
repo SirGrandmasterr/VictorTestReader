@@ -3,14 +3,47 @@
 import asyncio
 import logging
 import time
+from collections import deque
 
 from . import protocol
 
 log = logging.getLogger("teai_relay.registry")
 
+RATE_WINDOW = 60.0  # seconds over which chunks/s is averaged
+
 
 class AgentGone(Exception):
     """Raised when a frame cannot be delivered because the socket is closed."""
+
+
+class RollingRate:
+    """Events per second over a sliding window, counted in one-second buckets."""
+
+    def __init__(self, window=RATE_WINDOW, clock=time.monotonic):
+        self.window = float(window)
+        self.clock = clock
+        self._buckets = deque()  # (second, count), oldest first
+
+    def _prune(self, now):
+        cutoff = now - self.window
+        while self._buckets and self._buckets[0][0] < cutoff:
+            self._buckets.popleft()
+
+    def hit(self, count=1):
+        now = self.clock()
+        second = int(now)
+        if self._buckets and self._buckets[-1][0] == second:
+            self._buckets[-1] = (second, self._buckets[-1][1] + count)
+        else:
+            self._buckets.append((second, count))
+        self._prune(now)
+
+    def per_second(self):
+        """Average rate over the window (the full window, so a burst decays over time)."""
+        now = self.clock()
+        self._prune(now)
+        total = sum(count for _, count in self._buckets)
+        return round(total / self.window, 1)
 
 
 class AgentConnection:
@@ -31,6 +64,8 @@ class AgentConnection:
         self.last_seen = self.connected_at
         self.requests_total = 0
         self.in_flight = {}  # request_id -> asyncio.Queue of frames
+        self.queued = 0  # requests waiting for a free slot on this agent
+        self.chunk_rate = RollingRate()
         self._send_lock = asyncio.Lock()
         self.closed = False
 
@@ -112,8 +147,15 @@ class AgentConnection:
         queue = self.in_flight.get(frame.get("request_id"))
         if queue is None:
             return False
+        if frame.get("type") == protocol.CHUNK:
+            self.chunk_rate.hit()
         queue.put_nowait(frame)
         return True
+
+    @property
+    def chunks_per_s(self):
+        """Streamed chunks per second over the last minute (roughly tokens/s for one stream)."""
+        return self.chunk_rate.per_second()
 
     def fail_all(self, message, status=502):
         """Terminate every in-flight request with an error frame."""
@@ -133,6 +175,8 @@ class AgentConnection:
             "state": self.state,
             "models": self.models,
             "in_flight": self.load,
+            "queued": self.queued,
+            "chunks_per_s": self.chunks_per_s,
             "max_concurrency": self.max_concurrency,
             "requests_total": self.requests_total,
             "connected_at": self.connected_at,

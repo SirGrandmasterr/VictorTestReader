@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from teai_relay import protocol  # noqa: E402
 from teai_relay.config import ConfigError, RelayConfig, parse_keys  # noqa: E402
+from teai_relay.registry import RollingRate  # noqa: E402
 from teai_relay.server import create_app  # noqa: E402
 
 AGENT_KEY = "teai_agent_key_0123456789"
@@ -356,6 +357,8 @@ def test_requests_queue_when_the_agent_is_at_capacity():
                 assert len([f for f in agent.received if f["type"] == protocol.REQUEST]) == 1
                 status = await (await relay.session.get(relay.url("/status"))).json()
                 assert status["agents"][0]["in_flight"] == 1
+                assert status["agents"][0]["queued"] == 1
+                assert status["agents"][0]["chunks_per_s"] == 0
                 release.set()
                 second = await second_task
                 first_payloads, _ = await read_sse(first)
@@ -364,6 +367,10 @@ def test_requests_queue_when_the_agent_is_at_capacity():
                 assert second_payloads[-1] == "[DONE]"
                 assert "queued" in second_comments
                 assert len([f for f in agent.received if f["type"] == protocol.REQUEST]) == 2
+                status = await (await relay.session.get(relay.url("/status"))).json()
+                assert status["agents"][0]["queued"] == 0
+                assert status["agents"][0]["in_flight"] == 0
+                assert status["agents"][0]["chunks_per_s"] == round(6 / 60, 1)  # 3 chunks per stream
 
     run(scenario())
 
@@ -423,3 +430,19 @@ def test_key_parsing_and_config_validation():
     )
     assert config.queue_timeout == 42.0
     assert config.agent_keys == {"abcdefghijklmnop": "gpu"}
+
+
+def test_rolling_rate_averages_over_its_window():
+    now = [1000.0]
+    rate = RollingRate(window=60, clock=lambda: now[0])
+    assert rate.per_second() == 0
+    for _ in range(120):
+        rate.hit()
+    assert rate.per_second() == 2.0
+    now[0] += 30
+    rate.hit(60)
+    assert rate.per_second() == 3.0
+    now[0] += 31  # the first burst falls out of the window
+    assert rate.per_second() == 1.0
+    now[0] += 60
+    assert rate.per_second() == 0

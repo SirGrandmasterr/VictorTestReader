@@ -241,7 +241,7 @@ class VerdictService:
         self.delay = delay
         self.requests = []
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, on_usage=None):
         self.requests.append(messages)
         if self.fail:
             raise BackendUnavailable("down")

@@ -62,6 +62,9 @@ class FakeVLLM:
                     await response.write(b": keepalive\n\n")
             await emit("text.")
             await emit(None, "stop")
+            if (body.get("stream_options") or {}).get("include_usage"):
+                usage = {"choices": [], "usage": {"prompt_tokens": 21, "completion_tokens": 4, "total_tokens": 25}}
+                await response.write(("data: " + json.dumps(usage) + "\n\n").encode("utf-8"))
             await response.write(b"data: [DONE]\n\n")
             await response.write_eof()
         except (ConnectionResetError, asyncio.CancelledError):
@@ -142,14 +145,20 @@ def test_desktop_client_edits_text_through_relay_and_agent():
             assert service.last_status["agents"][0]["agent_version"]
 
             progress = []
+            records = []
             result = await stack.in_thread(
-                service.stream_edit, "qwen-27b", "Fix grammar.", "Orignal text.", threading.Event(), progress.append
+                lambda: service.stream_edit(
+                    "qwen-27b", "Fix grammar.", "Orignal text.", threading.Event(), progress.append,
+                    on_usage=records.append,
+                )
             )
             assert result == "Edited text."
             assert progress == [7, 12]
+            assert [(r.prompt_tokens, r.completion_tokens) for r in records] == [(21, 4)]
             body = stack.vllm.bodies[-1]
             assert body["model"] == "qwen-27b"
             assert body["max_tokens"] == 2048
+            assert body["stream_options"] == {"include_usage": True}
             assert body["chat_template_kwargs"] == {"enable_thinking": False}
             assert body["messages"][1]["content"].endswith("Text:\nOrignal text.")
 
@@ -157,6 +166,8 @@ def test_desktop_client_edits_text_through_relay_and_agent():
             assert status["relay"]["requests_total"] == 1
             assert status["agents"][0]["requests_total"] == 1
             assert status["agents"][0]["in_flight"] == 0
+            assert status["agents"][0]["queued"] == 0
+            assert status["agents"][0]["chunks_per_s"] > 0
 
     asyncio.run(scenario())
 

@@ -45,6 +45,22 @@ Closing the HTTP connection cancels the request: the relay sends a `cancel`
 frame to the agent, which drops its HTTP connection to vLLM, and vLLM aborts
 the generation.
 
+### Throughput fields in `/status`
+
+Every entry of `agents` carries, besides `state`, `models`, `in_flight` and
+`max_concurrency`:
+
+| Field          | Meaning                                                                  |
+|----------------|--------------------------------------------------------------------------|
+| `queued`       | Requests waiting for a free slot on this agent right now.                |
+| `chunks_per_s` | Streamed SSE chunks per second over the last 60 s (≈ tokens/s summed over all streams). |
+
+The desktop app polls `/status` every 10 s while an automatic review runs and
+shows `GPU ≈ N chunks/s · Q queued` in the progress line. Clients that ask
+for `stream_options: {"include_usage": true}` receive vLLM's final chunk with
+the `usage` object (`prompt_tokens`, `completion_tokens`) and an empty
+`choices` list; the relay forwards it untouched.
+
 ## Agent side (WebSocket)
 
 Endpoint: `GET /agent/ws` with `Authorization: Bearer <agent key>`. Every frame
