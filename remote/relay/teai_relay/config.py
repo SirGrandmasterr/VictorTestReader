@@ -2,7 +2,10 @@
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict
+
+DEFAULT_KEYS_FILE = "/data/keys.json"
 
 
 class ConfigError(ValueError):
@@ -81,10 +84,15 @@ class RelayConfig:
     hello_timeout: float = 30.0
     log_level: str = "INFO"
     public_url: str = ""
+    admin_key: str = ""  # empty: the /admin routes answer 404
+    keys_file: str = DEFAULT_KEYS_FILE  # keys added through the admin API or the keys command
 
     @classmethod
     def from_environ(cls, environ=None):
         environ = os.environ if environ is None else environ
+        admin_key = environ.get("RELAY_ADMIN_KEY", "").strip()
+        if admin_key and len(admin_key) < 16:
+            raise ConfigError("RELAY_ADMIN_KEY is too short; use at least 16 characters (python -m teai_relay keygen)")
         config = cls(
             host=environ.get("RELAY_HOST", "0.0.0.0"),
             port=_env_int(environ, "RELAY_PORT", 8080),
@@ -99,13 +107,18 @@ class RelayConfig:
             hello_timeout=_env_float(environ, "RELAY_HELLO_TIMEOUT", 30.0, minimum=1.0),
             log_level=environ.get("RELAY_LOG_LEVEL", "INFO").upper(),
             public_url=environ.get("RELAY_PUBLIC_URL", "").strip(),
+            admin_key=admin_key,
+            keys_file=environ.get("RELAY_KEYS_FILE", "").strip() or DEFAULT_KEYS_FILE,
         )
-        if not config.agent_keys:
+        # Keys may also come from the keys file (or be created through the admin
+        # API), so an empty environment is only an error when neither exists.
+        can_add_later = bool(config.admin_key) or Path(config.keys_file).exists()
+        if not config.agent_keys and not can_add_later:
             raise ConfigError(
                 "RELAY_AGENT_KEYS is empty. Generate one with "
                 "'python -m teai_relay keygen' and give it to the GPU agent."
             )
-        if not config.client_keys:
+        if not config.client_keys and not can_add_later:
             raise ConfigError(
                 "RELAY_CLIENT_KEYS is empty. Generate one with "
                 "'python -m teai_relay keygen' for each TextEnhanceAI user."
@@ -113,4 +126,6 @@ class RelayConfig:
         shared = set(config.agent_keys) & set(config.client_keys)
         if shared:
             raise ConfigError("Agent and client keys must be different values.")
+        if config.admin_key and (config.admin_key in config.agent_keys or config.admin_key in config.client_keys):
+            raise ConfigError("RELAY_ADMIN_KEY must differ from every agent and client key.")
         return config

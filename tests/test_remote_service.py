@@ -7,8 +7,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from core.backend import EditCancelled, OutputTruncated, strip_thinking
-from core.remote_service import RemoteService, RemoteUnavailable, build_ssl_context, normalise_api_key
+from core.backend import EditCancelled, OutputTruncated, UsageRecord, strip_thinking
+from core.remote_service import (
+    RemoteService,
+    RemoteUnavailable,
+    build_ssl_context,
+    normalise_api_key,
+    relay_throughput,
+)
 
 
 def sse(event):
@@ -122,6 +128,12 @@ class FakeRelay:
                         self.wfile.write(sse(chunk("Edited ")))
                         self.wfile.write(sse(chunk("text.")))
                         self.wfile.write(sse(chunk(None, finish_reason="stop")))
+                        if body.get("stream_options", {}).get("include_usage"):
+                            # vLLM/OpenAI: a final chunk without choices carries the counts
+                            self.wfile.write(sse({
+                                "id": "chatcmpl-1", "object": "chat.completion.chunk", "choices": [],
+                                "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+                            }))
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionError, OSError):
@@ -338,3 +350,48 @@ def test_generate_returns_raw_text_for_custom_messages(relay):
     body = relay.requests[-1][3]
     assert body["messages"] == messages
     assert body["max_tokens"] == 99
+
+
+def test_usage_is_taken_from_the_final_chunk_and_reported(relay):
+    service = RemoteService(relay.url, "secret")
+    records = []
+
+    result = service.stream_edit("qwen-27b", "Fix grammar.", "Original.", threading.Event(), on_usage=records.append)
+
+    assert result == "Edited text."
+    body = relay.requests[-1][3]
+    assert body["stream_options"] == {"include_usage": True}
+    assert len(records) == 1
+    record = records[0]
+    assert isinstance(record, UsageRecord)
+    assert (record.prompt_tokens, record.completion_tokens, record.model) == (12, 5, "qwen-27b")
+    assert record.total_tokens == 17
+    assert 0 <= record.seconds < 10
+    assert service.last_usage is record
+    assert record.to_dict()["completion_tokens"] == 5
+
+
+def test_missing_usage_leaves_last_usage_untouched(relay):
+    relay.mode = "truncated"  # this stream carries no usage chunk
+    service = RemoteService(relay.url, "secret")
+    records = []
+
+    with pytest.raises(OutputTruncated):
+        service.stream_edit("qwen-27b", "i", "t", threading.Event(), on_usage=records.append)
+
+    assert records == []
+    assert service.last_usage is None
+    assert RemoteService._parse_usage({"prompt_tokens": "x"}) is None
+    assert RemoteService._parse_usage({"prompt_tokens": 3}) == (3, 0)
+
+
+def test_relay_throughput_sums_agents_and_tolerates_old_relays():
+    assert relay_throughput(None) is None
+    assert relay_throughput({"agents": []}) is None
+    assert relay_throughput({"agents": [{"name": "old", "in_flight": 1}]}) is None  # relay without the fields
+    status = {"agents": [
+        {"name": "a", "chunks_per_s": 30.5, "queued": 2, "in_flight": 3},
+        {"name": "b", "chunks_per_s": 7.5, "queued": 0, "in_flight": 1},
+        {"name": "c", "chunks_per_s": "bad", "queued": 1},
+    ]}
+    assert relay_throughput(status) == {"chunks_per_s": 38.0, "queued": 2, "in_flight": 4}

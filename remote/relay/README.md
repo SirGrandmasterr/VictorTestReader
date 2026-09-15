@@ -79,8 +79,52 @@ All settings are environment variables (see `.env.example`):
 | `RELAY_MAX_BODY_MB`         | 16      | Largest accepted request body                               |
 | `RELAY_LOG_LEVEL`           | INFO    | `DEBUG` prints every frame type                             |
 | `RELAY_PUBLIC_URL`          | —       | Shown in `/status` (informational)                          |
+| `RELAY_ADMIN_KEY`           | —       | Enables `/admin` (status page and key management)           |
+| `RELAY_KEYS_FILE`           | `/data/keys.json` | Keys created at runtime (Docker volume `relay-data`) |
 
-Keys must be at least 16 characters; agent and client keys must differ.
+Keys must be at least 16 characters; agent, client and admin keys must differ.
+With `RELAY_ADMIN_KEY` set, `RELAY_AGENT_KEYS`/`RELAY_CLIENT_KEYS` may be
+empty and every key can be created through the admin API instead.
+
+## Administration: status page and key management
+
+Set `RELAY_ADMIN_KEY` in `.env` (generate it with `keygen`) and restart. The
+admin routes use that key and nothing else; they answer 404 while it is unset.
+
+```bash
+ADMIN="Authorization: Bearer teai_admin..."
+curl -H "$ADMIN" https://relay.example.com/admin/keys            # names, kinds, sources (never the keys)
+curl -H "$ADMIN" -X POST https://relay.example.com/admin/keys \
+     -H "Content-Type: application/json" -d '{"name":"carol","kind":"client"}'   # the key is returned once
+curl -H "$ADMIN" -X DELETE https://relay.example.com/admin/keys/carol    # revoked immediately
+```
+
+`GET /admin` (open it in a browser with the key in the `Authorization`
+header, e.g. through a browser extension, or `curl -H "$ADMIN" .../admin`)
+renders a status page: agents with state, models, in-flight and queued
+requests, chunks/s and GPU metrics, relay counters, key names and the outcomes
+of the last 50 requests (request id, client name, status, duration, chunk
+count — never any text). The page is served with `Cache-Control: no-store`.
+
+Keys created this way live in `RELAY_KEYS_FILE` (the `relay-data` volume) and
+are merged with the environment keys; a file entry shadows an environment
+entry with the same name. Revoking an environment key records it as blocked
+in the file, so the block survives restarts until the entry leaves `.env`.
+Revoking an agent key also closes that agent's socket; its in-flight
+requests fail with 502. Requests of a revoked client key that are already
+streaming finish; the next request is rejected with 401. Admin actions are
+logged with the key *name* only.
+
+When the relay is down, the same file can be edited from the command line:
+
+```bash
+docker compose run --rm relay python -m teai_relay keys list
+docker compose run --rm relay python -m teai_relay keys add carol           # client key
+docker compose run --rm relay python -m teai_relay keys add gpu-2 --agent   # agent key
+docker compose run --rm relay python -m teai_relay keys revoke carol
+```
+
+A running relay does not re-read the file, so use the API while it runs.
 
 ## Endpoints
 
@@ -90,8 +134,12 @@ Keys must be at least 16 characters; agent and client keys must differ.
 | GET    | `/v1/models`            | client key  | Models offered by ready agents         |
 | POST   | `/v1/chat/completions`  | client key  | Chat completion (streaming or JSON)    |
 | POST   | `/v1/completions`       | client key  | Legacy completion                      |
-| GET    | `/status`               | client key  | Agents, load, counters                 |
+| GET    | `/status`               | client key  | Agents, load, queue depth, chunks/s, counters |
 | GET    | `/agent/ws`             | agent key   | WebSocket for GPU agents               |
+| GET    | `/admin`                | admin key   | HTML status page (404 without `RELAY_ADMIN_KEY`) |
+| GET    | `/admin/keys`           | admin key   | Key names and kinds                    |
+| POST   | `/admin/keys`           | admin key   | `{"name", "kind"}` → new key (shown once) |
+| DELETE | `/admin/keys/{name}`    | admin key   | Revoke a key immediately               |
 
 Example:
 

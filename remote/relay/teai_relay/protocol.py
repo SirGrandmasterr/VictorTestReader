@@ -20,7 +20,8 @@ CANCEL = "cancel"
 STATE_LOADING = "loading"
 STATE_READY = "ready"
 STATE_UNAVAILABLE = "unavailable"
-AGENT_STATES = (STATE_LOADING, STATE_READY, STATE_UNAVAILABLE)
+STATE_DRAINING = "draining"  # finishing in-flight requests, accepting no new ones, then exiting
+AGENT_STATES = (STATE_LOADING, STATE_READY, STATE_UNAVAILABLE, STATE_DRAINING)
 
 # Paths a client may ask the relay to forward to vLLM.
 FORWARDABLE_PATHS = ("/v1/chat/completions", "/v1/completions")

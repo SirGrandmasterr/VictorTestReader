@@ -3,10 +3,50 @@
 import asyncio
 import json
 import logging
+import math
+import re
 
 import aiohttp
 
 log = logging.getLogger("teai_agent.vllm")
+
+# Prometheus metrics read from vLLM's /metrics; matched by suffix so a renamed
+# prefix (vllm:, vllm_, ...) or a future family name still works.
+METRIC_SUFFIXES = (
+    "num_requests_running",
+    "num_requests_waiting",
+    "gpu_cache_usage_perc",
+    "generation_tokens_total",
+)
+_METRIC_LINE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(\{[^}]*\})?\s+([-+0-9.eEinfNa]+)")
+
+
+def parse_metrics(text, suffixes=METRIC_SUFFIXES):
+    """Extract the wanted gauges/counters from a Prometheus text exposition.
+
+    Returns ``{suffix: float}`` for every metric found; samples of the same
+    family (several ``model_name`` labels) are summed. Missing metrics are
+    simply absent, unparsable lines are skipped.
+    """
+    found = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _METRIC_LINE.match(line)
+        if not match:
+            continue
+        name, _, value = match.groups()
+        for suffix in suffixes:
+            if name == suffix or name.endswith(":" + suffix) or name.endswith("_" + suffix):
+                try:
+                    number = float(value)
+                except ValueError:
+                    break
+                if math.isfinite(number):  # Prometheus may emit NaN/+Inf; those are no data
+                    found[suffix] = found.get(suffix, 0.0) + number
+                break
+    return found
 
 
 class VLLMError(Exception):
@@ -87,6 +127,19 @@ class VLLMClient:
             pass
         meta["vllm_error"] = "" if models else "vLLM lists no models yet"
         return True, models, meta
+
+    async def metrics(self):
+        """Return the parsed ``GET /metrics`` gauges (see ``parse_metrics``), or None when unreachable."""
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            async with self.session.get(self.base_url + "/metrics", headers=self._headers(), timeout=timeout) as response:
+                if response.status != 200:
+                    return None
+                return parse_metrics(await response.text())
+        except (aiohttp.ClientError, OSError, asyncio.TimeoutError):
+            return None
+        except Exception:  # never fatal for the monitor
+            return None
 
     async def forward(self, path, body, on_chunk=None):
         """Forward one request. Streams SSE payloads to ``on_chunk`` or returns JSON.

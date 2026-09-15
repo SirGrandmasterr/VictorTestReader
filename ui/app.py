@@ -1,14 +1,17 @@
-"""Main Tkinter application for TextEnhanceAI v0.13."""
+"""Main Tkinter application for TextEnhanceAI."""
 
+import platform
 import queue
 import re
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
-from core.backend import EditCancelled, OutputTruncated
+from core import RELEASES_URL, __version__
+from core.backend import EditCancelled, OutputTruncated, add_usage, empty_usage, format_usage
 from core.diff_engine import build_edit_session, render_reviewed_text
 from core.documents import (
     FORMATTED_KINDS,
@@ -22,6 +25,7 @@ from core.documents import (
 )
 from core.editing import explain_session, run_chain
 from core.ollama_service import OllamaService
+from core.paths import ensure_dir, migrate_legacy_settings, user_data_dir
 from core.prompts import EDITING_MODES, PROMPTS, build_chain, build_instruction, describe_chain, validate_custom_modes
 from core.scratchpad import ScratchpadLogger
 from core.services import build_service
@@ -37,7 +41,7 @@ from .connection_dialog import ConnectionDialog
 from .i18n import current_language, resolve_language, set_language, tr
 from .mode_dialog import ManageModesDialog
 from .review_panel import ReviewPanel
-from .theme import PALETTE, apply_theme, font, style_text
+from .theme import PALETTE, Tooltip, apply_theme, font, style_text
 from .workflow_screen import WorkflowScreen
 
 COLOR_OK = PALETTE["success"]
@@ -48,7 +52,7 @@ MODE_QUICK = "quick"
 MODE_AUTO = "auto"
 SEPARATOR_CUSTOM = "\u2014 Custom modes \u2014"  # unselectable headings in the mode list
 SEPARATOR_CHAINS = "\u2014 Chains \u2014"
-APP_TITLE = "TextEnhanceAI - V 0.13"
+APP_TITLE = "TextEnhanceAI - V {0}".format(__version__)
 FILE_TYPES = [
     ("Documents", MANUSCRIPT_PATTERNS),
     ("Text files", "*.txt *.md *.text *.markdown"),
@@ -56,6 +60,15 @@ FILE_TYPES = [
     ("OpenDocument text", "*.odt"),
     ("All files", "*.*"),
 ]
+
+
+def _format_duration(seconds):
+    seconds = int(seconds or 0)
+    if seconds < 60:
+        return "{0} s".format(seconds)
+    if seconds < 3600:
+        return "{0} min {1:02d} s".format(seconds // 60, seconds % 60)
+    return "{0} h {1:02d} min".format(seconds // 3600, (seconds % 3600) // 60)
 
 
 def window_title(path, modified):
@@ -76,10 +89,20 @@ class EditorApp:
         ollama_service=None,
         remote_service=None,
         settings=None,
+        data_dir=None,
     ):
+        """``app_directory`` is where the script lives (legacy settings location);
+        ``data_dir`` is where settings and scratchpads go (default: ``core.paths.user_data_dir``)."""
         self.root = root
         self.app_directory = Path(app_directory or Path.cwd())
-        self.settings = settings or AppSettings.load(self.app_directory / SETTINGS_FILENAME)
+        self.data_dir = ensure_dir(Path(data_dir) if data_dir is not None else user_data_dir())
+        self.startup_notice = ""
+        if settings is None:
+            migrated = migrate_legacy_settings(self.app_directory, self.data_dir)
+            if migrated is not None:
+                self.startup_notice = "Settings migrated to {0}".format(migrated)
+            settings = AppSettings.load(self.data_dir / SETTINGS_FILENAME)
+        self.settings = settings
         set_language(self.settings.ui_language)  # before any widget text is built
         self.services = {
             BACKEND_OLLAMA: ollama_service or OllamaService(),
@@ -107,6 +130,7 @@ class EditorApp:
         self.current_path = None  # quick-editor file (Path) or None while untitled
         self.current_document = None  # documents.LoadedDocument the editor text came from
         self.modified = False
+        self.session_usage = empty_usage()  # token counts of every request since the app started
 
         self.root.title(APP_TITLE)
         self.root.geometry("1120x780")
@@ -119,6 +143,8 @@ class EditorApp:
         self._bind_shortcuts()
         if self.settings.load_error:
             self.set_status(self.settings.load_error)
+        elif self.startup_notice:
+            self.set_status(self.startup_notice)
         self.root.after(100, self._poll_events)
         self.root.after(150, self.refresh_models)
 
@@ -142,8 +168,46 @@ class EditorApp:
         self.file_menu.add_separator()
         self.file_menu.add_command(label="Quit", command=self.close)
         menubar.add_cascade(label="File", menu=self.file_menu)
+        help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(label="Releases on GitHub", command=self.open_releases)
+        help_menu.add_separator()
+        help_menu.add_command(label="About TextEnhanceAI", command=self.show_about)
+        menubar.add_cascade(label="Help", menu=help_menu)
         self.root.config(menu=menubar)
         self._rebuild_recent_menu()
+
+    # ------------------------------------------------------------------ help
+    @staticmethod
+    def open_releases():
+        webbrowser.open(RELEASES_URL)
+
+    def about_text(self):
+        return (
+            "TextEnhanceAI {0}\n\n"
+            "Local and self-hosted LLM editing for authors.\n\n"
+            "Python {1} \u00b7 Tk {2}\n"
+            "Settings and scratchpads: {3}\n\n"
+            "New versions are published on the Releases page; this app does not update itself."
+        ).format(__version__, platform.python_version(), self.root.tk.call("info", "patchlevel"), self.data_dir)
+
+    def show_about(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("About TextEnhanceAI")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text="TextEnhanceAI", font=font(14, "bold")).pack(anchor="w")
+        ttk.Label(body, text=self.about_text(), justify=tk.LEFT, wraplength=420).pack(anchor="w", pady=(6, 12))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill=tk.X)
+        ttk.Button(buttons, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="Releases", command=self.open_releases, style="Primary.TButton").pack(
+            side=tk.RIGHT, padx=(0, 6)
+        )
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+        dialog.grab_set()
+        return dialog
 
     def _rebuild_recent_menu(self):
         self.recent_menu.delete(0, tk.END)
@@ -196,16 +260,11 @@ class EditorApp:
         top_bar = ttk.Frame(self.root, style="Toolbar.TFrame", padding=(12, 6))
         top_bar.grid(row=1, column=0, sticky="ew")
         ttk.Label(top_bar, text="Backend", style="Toolbar.TLabel").pack(side=tk.LEFT)
-        self.backend_var = tk.StringVar(value=BACKEND_LABELS[self.settings.backend])
-        self.backend_combo = ttk.Combobox(
-            top_bar,
-            textvariable=self.backend_var,
-            state="readonly",
-            width=18,
-            values=[BACKEND_LABELS[key] for key in (BACKEND_OLLAMA, BACKEND_REMOTE)],
-        )
+        self.backend_var = tk.StringVar(value="")
+        self.backend_combo = ttk.Combobox(top_bar, textvariable=self.backend_var, state="readonly", width=18)
         self.backend_combo.pack(side=tk.LEFT, padx=(6, 14))
         self.backend_combo.bind("<<ComboboxSelected>>", self._on_backend_selected)
+        self._refresh_backend_values()
 
         ttk.Label(top_bar, text="Model", style="Toolbar.TLabel").pack(side=tk.LEFT)
         self.model_var = tk.StringVar(value=self.settings.preferred_model())
@@ -322,6 +381,10 @@ class EditorApp:
             side=tk.LEFT, fill=tk.X, expand=True, padx=6
         )
         ttk.Button(bottom, text="Quit", command=self.close).pack(side=tk.RIGHT)
+        self.usage_var = tk.StringVar(value="")
+        self.usage_label = ttk.Label(bottom, textvariable=self.usage_var, anchor="e", style="Status.TLabel")
+        self.usage_label.pack(side=tk.RIGHT, padx=(6, 12))
+        self.usage_tooltip = Tooltip(self.usage_label, "")
         self.progress.pack_forget()
         self.cancel_button.pack_forget()
 
@@ -606,6 +669,21 @@ class EditorApp:
     def set_status(self, message):
         self.status_var.set(message)
 
+    def record_usage(self, record):
+        """Add one request's token counts to the session total shown in the status bar."""
+        add_usage(self.session_usage, record)
+        totals = self.session_usage
+        self.usage_var.set("Session: {0}".format(format_usage(totals)))
+        self.usage_tooltip.text = (
+            "Tokens used since the app started (every request in quick edit and automatic review)\n"
+            "Prompt tokens: {0:,}\nCompletion tokens: {1:,}\nRequests: {2}\nModel time: {3}\n"
+            "Last request: {4:,} in, {5:,} out ({6})"
+        ).format(
+            totals["prompt_tokens"], totals["completion_tokens"], totals["requests"],
+            _format_duration(totals["seconds"]), record.prompt_tokens, record.completion_tokens,
+            record.model or "?",
+        )
+
     def _set_connection(self, message, color):
         self.connection_var.set(message)
         header_colors = {
@@ -621,21 +699,44 @@ class EditorApp:
         if error:
             self.set_status(error)
 
+    def _backend_choices(self):
+        """The backend combobox entries: ``[(label, backend, profile name or None)]``."""
+        choices = [(BACKEND_LABELS[BACKEND_OLLAMA], BACKEND_OLLAMA, None)]
+        for name in self.settings.profile_names():
+            choices.append(("Remote: {0}".format(name), BACKEND_REMOTE, name))
+        return choices
+
+    def _backend_label(self, backend=None, profile=None):
+        backend = backend or self.settings.backend
+        if backend == BACKEND_REMOTE:
+            return "Remote: {0}".format(profile or self.settings.active_profile)
+        return BACKEND_LABELS[BACKEND_OLLAMA]
+
+    def _refresh_backend_values(self):
+        """List Local Ollama plus one "Remote: <profile>" entry per relay profile."""
+        labels = [label for label, _, _ in self._backend_choices()]
+        self.backend_combo.configure(values=labels, width=min(32, max(18, max(len(label) for label in labels))))
+        self.backend_var.set(self._backend_label())
+
     def _on_backend_selected(self, event=None):
         label = self.backend_var.get()
-        backend = next(
-            (key for key, value in BACKEND_LABELS.items() if value == label),
-            BACKEND_OLLAMA,
+        backend, profile = next(
+            ((backend, profile) for choice, backend, profile in self._backend_choices() if choice == label),
+            (BACKEND_OLLAMA, None),
         )
-        self._switch_backend(backend)
+        self._switch_backend(backend, profile)
 
-    def _switch_backend(self, backend):
+    def _switch_backend(self, backend, profile=None):
+        """Activate a backend; for the remote backend ``profile`` picks the relay profile."""
         if self.generating or self._controls_locked:
-            self.backend_var.set(BACKEND_LABELS[self.settings.backend])
+            self.backend_var.set(self._backend_label())
             return
         self.settings.backend = backend
+        if backend == BACKEND_REMOTE and profile and profile != self.settings.active_profile:
+            self.settings.set_active_profile(profile)
+            self.services[BACKEND_REMOTE] = self._remote_from_settings()
         self.service = self.services[backend]
-        self.backend_var.set(BACKEND_LABELS[backend])
+        self.backend_var.set(self._backend_label(backend))
         self.model_var.set(self.settings.preferred_model(backend))
         self.model_combo.configure(values=(self.model_var.get(),) if self.model_var.get() else ())
         self._save_settings()
@@ -660,6 +761,7 @@ class EditorApp:
         self.settings = settings
         self.services[BACKEND_REMOTE] = self._remote_from_settings()
         self._save_settings()
+        self._refresh_backend_values()
         self._switch_backend(settings.backend)
         if resolve_language(settings.ui_language) != current_language():
             self.set_status(tr("Restart TextEnhanceAI to apply the language."))
@@ -826,10 +928,14 @@ class EditorApp:
             if total > 1:
                 self.generation_verb = "Step {0}/{1}: {2}{3}".format(index, total, name, scope)
 
+        def on_usage(record):
+            self.events.put(("usage", record))
+
         def worker():
             try:
                 chain = run_chain(
-                    service, model, steps, source, cancel_event, on_step=on_step, on_progress=on_progress
+                    service, model, steps, source, cancel_event, on_step=on_step, on_progress=on_progress,
+                    on_usage=on_usage,
                 )
                 session = build_edit_session(
                     source,
@@ -845,7 +951,7 @@ class EditorApp:
                     self.generation_verb = "Explaining changes"
                     self._progress_chars = 0
                     try:
-                        explain_session(service, model, session, explain_instruction, cancel_event)
+                        explain_session(service, model, session, explain_instruction, cancel_event, on_usage=on_usage)
                     except EditCancelled:
                         pass  # the edit itself is done: open the review without explanations
                     except Exception:
@@ -899,7 +1005,7 @@ class EditorApp:
             )
             return
 
-        self.current_logger = ScratchpadLogger(self.app_directory)
+        self.current_logger = ScratchpadLogger(self.data_dir)
         self.current_logger.log_proposal(session)
         if not session.review_items:
             self.current_logger.log_outcome(session, "no changes", session.original_text)
@@ -946,7 +1052,12 @@ class EditorApp:
                     self._handle_generation_error(event[1], event[2])
                 elif kind == "generation_cancelled":
                     self._handle_generation_cancelled(event[1])
-                elif kind.startswith("workflow_"):
+                elif kind == "usage":
+                    self.record_usage(event[1])
+                elif kind == "workflow_usage":
+                    self.workflow_screen.handle_event(event)  # adds to the project total
+                    self.record_usage(event[1])
+                elif kind.startswith(("workflow_", "consistency_")):
                     self.workflow_screen.handle_event(event)
         except queue.Empty:
             pass

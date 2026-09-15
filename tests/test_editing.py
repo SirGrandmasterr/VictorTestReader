@@ -20,7 +20,7 @@ class FakeService:
         self.calls = []
         self.cancel_after = cancel_after  # set the cancel event after this many edits
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
         self.calls.append((instruction, text))
         if on_progress:
             on_progress(len(text))
@@ -34,7 +34,7 @@ class FakeService:
             return text.upper()
         return text + " (" + instruction + ")"
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
         raise AssertionError("not used")
 
 
@@ -83,7 +83,7 @@ class ExplainingService(FakeService):
         self.cancel = cancel
         self.requests = []
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
         self.requests.append((messages, max_tokens))
         if self.cancel:
             raise EditCancelled("cancelled")

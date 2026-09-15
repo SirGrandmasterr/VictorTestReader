@@ -9,14 +9,17 @@ import time
 from aiohttp import WSMsgType, web
 
 from . import __version__, protocol
-from .auth import bearer_token, lookup
-from .config import RelayConfig
+from .admin import render_admin_page
+from .auth import KeyStore, KeyStoreError, bearer_token, lookup, token_matches
+from .config import ConfigError, RelayConfig
 from .registry import AgentConnection, AgentGone, AgentRegistry
 
 log = logging.getLogger("teai_relay")
+admin_log = logging.getLogger("teai_relay.admin")
 
 CONFIG_KEY = web.AppKey("config", RelayConfig) if hasattr(web, "AppKey") else "config"
 REGISTRY_KEY = web.AppKey("registry", AgentRegistry) if hasattr(web, "AppKey") else "registry"
+KEYSTORE_KEY = web.AppKey("keystore", KeyStore) if hasattr(web, "AppKey") else "keystore"
 CLIENT_NAME_KEY = web.RequestKey("client_name", str) if hasattr(web, "RequestKey") else "client_name"
 
 
@@ -35,11 +38,16 @@ def _client_name(request):
 
 @web.middleware
 async def auth_middleware(request, handler):
-    """Require a client key for everything except /health, / and the agent socket."""
-    if request.path in ("/health", "/") or request.path.startswith("/agent/"):
+    """Require a client key for everything except /health, /, the agent socket and /admin.
+
+    Client keys are read from the key store on every request so a key added
+    or revoked through the admin API takes effect immediately. The admin
+    routes carry their own check (``require_admin``).
+    """
+    if request.path in ("/health", "/") or request.path.startswith(("/agent/", "/admin")):
         return await handler(request)
-    config = request.app[CONFIG_KEY]
-    name = lookup(bearer_token(request), config.client_keys)
+    store = request.app[KEYSTORE_KEY]
+    name = lookup(bearer_token(request), store.client_keys)
     if name is None:
         return json_error(
             401,
@@ -167,30 +175,36 @@ async def _read_json_body(request, config):
 
 
 async def _wait_for_slot(agent, sse, config, request_id):
-    """Poll until the agent has a free slot, sending keepalives while queued."""
+    """Poll until the agent has a free slot, sending keepalives while queued.
+
+    The wait is counted in ``agent.queued`` so ``/status`` shows the queue depth.
+    """
+    if agent.has_capacity:
+        return
     loop = asyncio.get_running_loop()
     deadline = loop.time() + config.queue_timeout
     next_keepalive = loop.time() + config.keepalive_interval
-    announced = False
-    while not agent.has_capacity:
-        if agent.closed:
-            raise RequestOutcome(502, "The GPU agent disconnected while the request was queued.", "agent_error")
-        now = loop.time()
-        if now >= deadline:
-            raise RequestOutcome(
-                503,
-                "The GPU is busy and the request timed out in the queue after {0:.0f}s.".format(
-                    config.queue_timeout
-                ),
-                "server_busy",
-            )
-        if not announced:
-            log.info("request %s queued behind %d on agent %s", request_id, agent.load, agent.name)
-            announced = True
-        if sse is not None and now >= next_keepalive:
-            await sse.comment("queued")
-            next_keepalive = now + config.keepalive_interval
-        await asyncio.sleep(0.25)
+    log.info("request %s queued behind %d on agent %s", request_id, agent.load, agent.name)
+    agent.queued += 1
+    try:
+        while not agent.has_capacity:
+            if agent.closed:
+                raise RequestOutcome(502, "The GPU agent disconnected while the request was queued.", "agent_error")
+            now = loop.time()
+            if now >= deadline:
+                raise RequestOutcome(
+                    503,
+                    "The GPU is busy and the request timed out in the queue after {0:.0f}s.".format(
+                        config.queue_timeout
+                    ),
+                    "server_busy",
+                )
+            if sse is not None and now >= next_keepalive:
+                await sse.comment("queued")
+                next_keepalive = now + config.keepalive_interval
+            await asyncio.sleep(0.25)
+    finally:
+        agent.queued -= 1
 
 
 async def proxy_request(request, path):
@@ -216,6 +230,7 @@ async def proxy_request(request, path):
         registry.requests_failed += 1
         message = registry.describe_unavailable(model)
         log.info("request %s client=%s model=%s rejected: %s", request_id, client, model, message)
+        registry.record_outcome(request_id, client, None, model, "error 503", time.time() - started, 0)
         return json_error(503, message, "model_unavailable", {"X-Request-ID": request_id})
 
     queue = None
@@ -312,13 +327,101 @@ async def proxy_request(request, path):
             "request %s finished: %s in %.1fs (%d chunks)",
             request_id, outcome_status, time.time() - started, sse.chunks if sse else 0,
         )
+        registry.record_outcome(
+            request_id, client, agent.name, model, outcome_status, time.time() - started, sse.chunks if sse else 0,
+        )
+
+
+# ------------------------------------------------------------ admin routes
+def require_admin(handler):
+    """Admin routes: 404 while no admin key is configured, 401 on a wrong key."""
+
+    async def wrapped(request):
+        config = request.app[CONFIG_KEY]
+        if not config.admin_key:
+            return json_error(404, "Not found.", "not_found")
+        if not token_matches(bearer_token(request), config.admin_key):
+            admin_log.warning("admin request %s %s from %s rejected: bad key", request.method, request.path, request.remote)
+            return json_error(
+                401, "Invalid admin key.", "authentication_error",
+                headers={"WWW-Authenticate": 'Bearer realm="teai-relay-admin"'},
+            )
+        return await handler(request)
+
+    return wrapped
+
+
+NO_STORE = {"Cache-Control": "no-store"}
+
+
+@require_admin
+async def admin_page(request):
+    config = request.app[CONFIG_KEY]
+    registry = request.app[REGISTRY_KEY]
+    store = request.app[KEYSTORE_KEY]
+    page = render_admin_page(registry.snapshot(__version__, config.public_url), list(registry.recent), store.list())
+    return web.Response(text=page, content_type="text/html", charset="utf-8", headers=NO_STORE)
+
+
+@require_admin
+async def admin_list_keys(request):
+    store = request.app[KEYSTORE_KEY]
+    return web.json_response({"keys": store.list()}, headers=NO_STORE)
+
+
+@require_admin
+async def admin_add_key(request):
+    store = request.app[KEYSTORE_KEY]
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return json_error(400, "Request body must be valid JSON.", "invalid_request_error")
+    if not isinstance(body, dict):
+        return json_error(400, "Request body must be a JSON object.", "invalid_request_error")
+    kind = str(body.get("kind") or "client")
+    try:
+        key = store.add(body.get("name"), kind)
+    except KeyStoreError as exc:
+        return json_error(409 if "already exists" in str(exc) else 400, str(exc), "invalid_request_error")
+    except OSError as exc:
+        return json_error(500, "The keys file could not be written: {0}".format(exc), "relay_error")
+    name = str(body.get("name")).strip()
+    admin_log.info("key '%s' (%s) created", name, kind)
+    return web.json_response({"name": name, "kind": kind, "key": key}, status=201, headers=NO_STORE)
+
+
+@require_admin
+async def admin_revoke_key(request):
+    store = request.app[KEYSTORE_KEY]
+    registry = request.app[REGISTRY_KEY]
+    name = request.match_info["name"]
+    try:
+        kind = store.revoke(name)
+    except KeyStoreError as exc:
+        return json_error(400, str(exc), "invalid_request_error")
+    except OSError as exc:
+        return json_error(500, "The keys file could not be written: {0}".format(exc), "relay_error")
+    if kind is None:
+        return json_error(404, "No key named '{0}'.".format(name), "not_found")
+    admin_log.info("key '%s' (%s) revoked", name, kind)
+    closed = 0
+    if kind == "agent":
+        for agent in registry.agents_with_key(name):
+            closed += 1
+            agent.closed = True
+            agent.fail_all("The GPU agent's key was revoked.")
+            try:
+                await asyncio.wait_for(agent.ws.close(code=4004, message=b"agent key revoked"), timeout=5)
+            except Exception:
+                pass
+    return web.json_response({"name": name, "kind": kind, "agents_closed": closed}, headers=NO_STORE)
 
 
 # ------------------------------------------------------------ agent socket
 async def agent_websocket(request):
     config = request.app[CONFIG_KEY]
     registry = request.app[REGISTRY_KEY]
-    key_name = lookup(bearer_token(request), config.agent_keys)
+    key_name = lookup(bearer_token(request), request.app[KEYSTORE_KEY].agent_keys)
     if key_name is None:
         log.warning("agent connection from %s rejected: bad key", request.remote)
         return json_error(401, "Invalid agent key.", "authentication_error")
@@ -381,9 +484,10 @@ async def agent_websocket(request):
                 agent.apply_models(frame)
                 log.info("agent %s: state=%s models=%s", agent.name, agent.state, agent.model_ids)
             elif kind == protocol.STATUS:
-                state = frame.get("state")
-                if state in protocol.AGENT_STATES:
-                    agent.state = state
+                was_draining = agent.draining
+                agent.apply_status(frame)
+                if agent.draining and not was_draining:
+                    log.info("agent %s is draining; no new requests are routed to it", agent.name)
             elif kind in (protocol.CHUNK, protocol.DONE, protocol.RESPONSE, protocol.ERROR, protocol.CANCELLED):
                 agent.deliver(frame)
             else:
@@ -416,10 +520,30 @@ def _parse_frame(msg):
 
 
 # ------------------------------------------------------------- application
-def create_app(config):
+def build_keystore(config):
+    """Merge the environment keys with the keys file and check that the relay can serve at all."""
+    store = KeyStore(config.agent_keys, config.client_keys, config.keys_file)
+    if store.load_error:
+        log.warning("%s (continuing with the environment keys)", store.load_error)
+    for kind, variable in (("agent", "RELAY_AGENT_KEYS"), ("client", "RELAY_CLIENT_KEYS")):
+        if store.keys(kind):
+            continue
+        if config.admin_key:
+            log.warning("no %s keys yet; create one with POST /admin/keys or 'python -m teai_relay keys add'", kind)
+        else:
+            raise ConfigError(
+                "{0} is empty and {1} holds no {2} keys. Generate one with 'python -m teai_relay keygen'.".format(
+                    variable, config.keys_file, kind
+                )
+            )
+    return store
+
+
+def create_app(config, keystore=None):
     app = web.Application(client_max_size=config.max_body_bytes, middlewares=[auth_middleware])
     app[CONFIG_KEY] = config
     app[REGISTRY_KEY] = AgentRegistry()
+    app[KEYSTORE_KEY] = keystore if keystore is not None else build_keystore(config)
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
@@ -427,6 +551,10 @@ def create_app(config):
     app.router.add_post("/v1/chat/completions", chat_completions)
     app.router.add_post("/v1/completions", completions)
     app.router.add_get("/agent/ws", agent_websocket)
+    app.router.add_get("/admin", admin_page)
+    app.router.add_get("/admin/keys", admin_list_keys)
+    app.router.add_post("/admin/keys", admin_add_key)
+    app.router.add_delete("/admin/keys/{name}", admin_revoke_key)
     return app
 
 
@@ -435,12 +563,14 @@ def run(config):
         level=getattr(logging, config.log_level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    keystore = build_keystore(config)
     log.info(
-        "TextEnhanceAI relay %s listening on %s:%d (%d agent keys, %d client keys)",
-        __version__, config.host, config.port, len(config.agent_keys), len(config.client_keys),
+        "TextEnhanceAI relay %s listening on %s:%d (%d agent keys, %d client keys, admin API %s)",
+        __version__, config.host, config.port, len(keystore.agent_keys), len(keystore.client_keys),
+        "on" if config.admin_key else "off",
     )
     web.run_app(
-        create_app(config),
+        create_app(config, keystore),
         host=config.host,
         port=config.port,
         access_log=None,

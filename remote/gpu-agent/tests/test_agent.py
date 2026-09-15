@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "agent"))
 from teai_agent import protocol  # noqa: E402
 from teai_agent.agent import Agent  # noqa: E402
 from teai_agent.config import AgentConfig, ConfigError, relay_websocket_url  # noqa: E402
+from teai_agent.vllm_client import parse_metrics  # noqa: E402
 
 AGENT_KEY = "teai_agent_key_0123456789"
 
@@ -33,11 +34,28 @@ class FakeVLLM:
         self.requests = []
         self.disconnected = asyncio.Event()
         self.started = asyncio.Event()
+        self.release = asyncio.Event()  # lets a "slow" stream finish early
+        self.tokens_total = 1000  # generation_tokens_total reported by /metrics
+        self.metrics_mode = "normal"  # or "missing" (404)
         app = web.Application()
         app.router.add_get("/v1/models", self.list_models)
         app.router.add_get("/version", self.version)
+        app.router.add_get("/metrics", self.metrics)
         app.router.add_post("/v1/chat/completions", self.chat)
         self.server = TestServer(app)
+
+    async def metrics(self, request):
+        if self.metrics_mode == "missing":
+            raise web.HTTPNotFound()
+        text = (
+            "# HELP vllm:num_requests_running Number of requests currently running on GPU.\n"
+            "# TYPE vllm:num_requests_running gauge\n"
+            'vllm:num_requests_running{model_name="qwen-27b"} 2.0\n'
+            'vllm:num_requests_waiting{model_name="qwen-27b"} 1.0\n'
+            'vllm:gpu_cache_usage_perc{model_name="qwen-27b"} 0.42\n'
+            'vllm:generation_tokens_total{model_name="qwen-27b"} ' + str(self.tokens_total) + "\n"
+        )
+        return web.Response(text=text, content_type="text/plain")
 
     async def list_models(self, request):
         if self.mode == "down":
@@ -63,6 +81,8 @@ class FakeVLLM:
             self.started.set()
             if self.mode == "slow":
                 for _ in range(100):
+                    if self.release.is_set():
+                        break
                     await asyncio.sleep(0.1)
                     await response.write(b": keepalive\n\n")
             await response.write(sse_line({"choices": [{"delta": {"content": "text."}, "finish_reason": "stop"}]}))
@@ -158,6 +178,7 @@ class Harness:
             reconnect_max_delay=1.0,
             request_timeout=30.0,
             ws_heartbeat=5.0,
+            status_interval=0.3,
         )
         for key, value in self.overrides.items():
             setattr(config, key, value)
@@ -370,3 +391,142 @@ def test_relay_url_normalisation_and_config_validation():
     assert config.agent_name == "gpu-9"
     assert config.tls_verify is False
     assert config.vllm_base_url == "http://vllm:8000"
+
+
+# --------------------------------------------------------------- metrics
+def test_parse_metrics_matches_suffixes_and_sums_labels():
+    text = (
+        "# HELP something\n"
+        'vllm:num_requests_running{model_name="a"} 2\n'
+        'vllm:num_requests_running{model_name="b"} 1\n'
+        "vllm_num_requests_waiting 3\n"
+        'other:gpu_cache_usage_perc{engine="0"} 0.5\n'
+        "vllm:generation_tokens_total 1234.0\n"
+        "vllm:prompt_tokens_total 99\n"
+        "garbage line without value\n"
+        "vllm:num_requests_running nan_is_bad\n"
+    )
+    assert parse_metrics(text) == {
+        "num_requests_running": 3.0, "num_requests_waiting": 3.0, "gpu_cache_usage_perc": 0.5,
+        "generation_tokens_total": 1234.0,
+    }
+    assert parse_metrics("") == {}
+    assert parse_metrics("vllm:generation_tokens_total 5") == {"generation_tokens_total": 5.0}
+
+
+def test_agent_reports_metrics_in_status_frames():
+    async def scenario():
+        async with Harness() as h:
+            await h.relay.wait_ready()
+            status = await h.relay.next_frame(protocol.STATUS)
+            assert status["state"] == protocol.STATE_READY
+            assert status["in_flight"] == 0
+            assert status["metrics"]["num_requests_running"] == 2
+            assert status["metrics"]["num_requests_waiting"] == 1
+            assert status["metrics"]["gpu_cache_usage_perc"] == 0.42
+            assert status["metrics"]["generation_tokens_total"] == 1000
+            h.vllm.tokens_total += 300
+            for _ in range(10):
+                status = await h.relay.next_frame(protocol.STATUS)
+                if status["metrics"].get("tokens_per_s"):
+                    break
+            assert status["metrics"]["tokens_per_s"] > 0
+            snapshot = h.agent.snapshot()
+            assert snapshot["vllm"]["metrics"]["generation_tokens_total"] == 1300
+            assert snapshot["draining"] is False
+            # a vLLM without /metrics leaves the metrics empty, the agent keeps running
+            h.vllm.metrics_mode = "missing"
+            for _ in range(10):
+                status = await h.relay.next_frame(protocol.STATUS)
+                if not status["metrics"]:
+                    break
+            assert status["metrics"] == {}
+
+    run(scenario())
+
+
+# ----------------------------------------------------------------- drain
+def test_drain_finishes_in_flight_requests_refuses_new_ones_and_exits():
+    async def scenario():
+        async with Harness() as h:
+            await h.relay.wait_ready()
+            h.vllm.mode = "slow"
+            await h.relay.send(await request_frame("req-1"))
+            await asyncio.wait_for(h.vllm.started.wait(), timeout=5)
+            h.agent.request_drain()
+            h.agent.request_drain()  # idempotent
+            assert h.agent.draining is True and h.agent.state == protocol.STATE_DRAINING
+            status = await h.relay.next_frame(protocol.STATUS)
+            assert status["state"] == protocol.STATE_DRAINING and status["in_flight"] == 1
+            await h.relay.send(await request_frame("req-2"))
+            error = await h.relay.next_frame(protocol.ERROR)
+            assert error["request_id"] == "req-2" and error["status"] == 503 and "draining" in error["message"]
+            assert "req-1" in h.agent.in_flight  # the running request is untouched
+            assert not h.task.done()
+            h.vllm.release.set()
+            done = await h.relay.next_frame(protocol.DONE)
+            assert done["request_id"] == "req-1"
+            await asyncio.wait_for(h.task, timeout=5)  # run() returns once the drain completed
+            assert h.agent.in_flight == {}
+            assert h.agent.snapshot()["draining"] is True
+            assert h.relay.ws.closed
+
+    run(scenario())
+
+
+def test_drain_timeout_aborts_in_flight_requests_with_502():
+    async def scenario():
+        async with Harness(drain_timeout=0.5) as h:
+            await h.relay.wait_ready()
+            h.vllm.mode = "slow"
+            await h.relay.send(await request_frame("req-1"))
+            await asyncio.wait_for(h.vllm.started.wait(), timeout=5)
+            h.agent.request_drain()
+            error = await h.relay.next_frame(protocol.ERROR)
+            assert error["request_id"] == "req-1" and error["status"] == 502 and "drained" in error["message"]
+            await asyncio.wait_for(h.task, timeout=5)
+            assert h.agent.requests_failed == 1
+
+    run(scenario())
+
+
+def test_sigterm_handler_drains_or_stops_depending_on_the_flag():
+    async def scenario():
+        async with Harness(drain_on_term=True) as h:
+            await h.relay.wait_ready()
+            h.agent.handle_term()  # what the SIGTERM handler calls
+            assert h.agent.draining is True
+            await asyncio.wait_for(h.task, timeout=5)  # nothing in flight: exits right away
+        async with Harness(drain_on_term=False) as h:
+            await h.relay.wait_ready()
+            h.agent.handle_term()
+            assert h.agent.draining is False
+            await asyncio.wait_for(h.task, timeout=5)
+
+    run(scenario())
+
+
+def test_health_server_drain_endpoint():
+    port = free_port()
+
+    async def scenario():
+        async with Harness(health_port=port, health_host="127.0.0.1") as h:
+            await h.relay.wait_ready()
+            async with aiohttp.ClientSession() as session:
+                response = await session.post("http://127.0.0.1:{0}/drain".format(port))
+                assert response.status == 202
+                body = await response.json()
+                assert body["draining"] is True and body["state"] == protocol.STATE_DRAINING
+            await asyncio.wait_for(h.task, timeout=5)
+
+    run(scenario())
+
+
+def test_drain_and_status_configuration():
+    config = AgentConfig.from_environ({"RELAY_URL": "https://relay.example.com", "RELAY_AGENT_KEY": "k"})
+    assert config.status_interval == 10.0 and config.drain_on_term is True and config.drain_timeout == 600.0
+    config = AgentConfig.from_environ({
+        "RELAY_URL": "https://relay.example.com", "RELAY_AGENT_KEY": "k",
+        "AGENT_STATUS_INTERVAL": "5", "AGENT_DRAIN_ON_TERM": "no", "AGENT_DRAIN_TIMEOUT": "30",
+    })
+    assert config.status_interval == 5.0 and config.drain_on_term is False and config.drain_timeout == 30.0

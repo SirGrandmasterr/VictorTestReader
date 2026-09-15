@@ -22,7 +22,16 @@ class RelayGone(Exception):
 
 
 class Agent:
-    """Bridge between the relay (outbound WebSocket) and the local vLLM server."""
+    """Bridge between the relay (outbound WebSocket) and the local vLLM server.
+
+    Besides forwarding requests the agent scrapes vLLM's Prometheus metrics
+    every ``status_interval`` seconds and reports them in ``hello.meta`` and
+    periodic ``status`` frames. ``request_drain()`` (``POST /drain`` on the
+    health server, or SIGTERM with ``drain_on_term``) switches to the
+    ``draining`` state: the relay stops routing here, new request frames are
+    answered with 503, in-flight requests finish, and once nothing is in
+    flight the socket is closed and ``run()`` returns.
+    """
 
     def __init__(self, config, session=None):
         self.config = config
@@ -31,6 +40,12 @@ class Agent:
         self.state = protocol.STATE_LOADING
         self.models = []
         self.vllm_meta = {}
+        self.metrics = {}  # last scrape of vLLM's /metrics plus tokens_per_s (see _monitor_metrics)
+        self.draining = False
+        self.drain_started = None
+        self._drain_task = None
+        self._drain_abort = False  # in-flight requests are being aborted by the drain timeout
+        self._tokens_sample = None  # (generation_tokens_total, monotonic time) of the previous scrape
         self.ever_ready = False
         self.ws = None
         self.relay_connected = False
@@ -61,26 +76,69 @@ class Agent:
             request_timeout=self.config.request_timeout,
         )
         health_runner = await self._start_health_server()
-        monitor = asyncio.ensure_future(self._monitor_vllm())
+        monitors = [asyncio.ensure_future(self._monitor_vllm()), asyncio.ensure_future(self._monitor_metrics())]
         try:
             await self._connection_loop()
         finally:
-            monitor.cancel()
-            try:
-                await monitor
-            except (asyncio.CancelledError, Exception):
-                pass
+            for monitor in monitors:
+                monitor.cancel()
+            for monitor in monitors:
+                try:
+                    await monitor
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if self._drain_task is not None and not self._drain_task.done():
+                self._drain_task.cancel()
             if health_runner is not None:
                 await health_runner.cleanup()
             if self._owns_session:
                 await self.session.close()
 
     def request_stop(self):
-        """Ask the agent to shut down gracefully (signal handler friendly)."""
+        """Ask the agent to shut down at once (signal handler friendly); in-flight requests are aborted."""
         if self._stop is not None:
             self._stop.set()
         if self.ws is not None and not self.ws.closed:
             asyncio.ensure_future(self.ws.close(code=1001, message=b"agent shutting down"))
+
+    def handle_term(self):
+        """SIGTERM: drain when configured (docker compose stop), otherwise stop at once."""
+        if self.config.drain_on_term:
+            self.request_drain()
+        else:
+            self.request_stop()
+
+    def request_drain(self):
+        """Stop taking requests, finish the running ones, then exit (idempotent)."""
+        if self.draining or self._stop is None:
+            return
+        self.draining = True
+        self.drain_started = time.time()
+        self.state = protocol.STATE_DRAINING
+        log.info("draining: %d request(s) in flight, no new ones accepted (timeout %.0fs)",
+                 len(self.in_flight), self.config.drain_timeout)
+        self._drain_task = asyncio.ensure_future(self._drain())
+
+    async def _drain(self):
+        try:
+            await self._send_status()
+        except RelayGone:
+            pass
+        deadline = time.monotonic() + self.config.drain_timeout
+        while self.in_flight and time.monotonic() < deadline and not self._stop.is_set():
+            await asyncio.sleep(0.25)
+        if self.in_flight and not self._stop.is_set():
+            log.warning("drain timeout: aborting %d request(s) still in flight", len(self.in_flight))
+            self._drain_abort = True
+            await self._abort_in_flight("drain timeout")
+        log.info("drain complete, exiting")
+        self._stop.set()
+        ws = self.ws
+        if ws is not None and not ws.closed:
+            try:
+                await ws.close(code=1001, message=b"agent drained")
+            except Exception:
+                pass
 
     async def _sleep_unless_stopped(self, seconds):
         try:
@@ -100,6 +158,8 @@ class Agent:
                 state = protocol.STATE_UNAVAILABLE
             else:
                 state = protocol.STATE_LOADING
+            if self.draining:
+                state = protocol.STATE_DRAINING  # sticky until the agent exits
             changed = (state, models) != (self.state, self.models)
             self.state, self.models = state, models
             self.vllm_meta.update(meta)
@@ -123,6 +183,48 @@ class Agent:
                 else self.config.poll_interval_loading
             )
             await self._sleep_unless_stopped(interval)
+
+    async def _monitor_metrics(self):
+        """Scrape vLLM's /metrics every ``status_interval`` seconds and report a status frame."""
+        while not self._stop.is_set():
+            await self._sleep_unless_stopped(self.config.status_interval)
+            if self._stop.is_set():
+                break
+            await self.refresh_metrics()
+            if self.relay_connected:
+                try:
+                    await self._send_status()
+                except RelayGone:
+                    pass
+
+    async def refresh_metrics(self):
+        """Read vLLM's metrics once; tokens/s comes from the counter delta since the previous read."""
+        scraped = await self.vllm.metrics()
+        now = time.monotonic()
+        if scraped is None:
+            self.metrics = {}
+            self._tokens_sample = None
+            return self.metrics
+        metrics = {}
+        for name in ("num_requests_running", "num_requests_waiting"):
+            if name in scraped:
+                metrics[name] = int(scraped[name])
+        if "gpu_cache_usage_perc" in scraped:
+            metrics["gpu_cache_usage_perc"] = round(scraped["gpu_cache_usage_perc"], 3)
+        total = scraped.get("generation_tokens_total")
+        if total is not None:
+            metrics["generation_tokens_total"] = int(total)
+            if self._tokens_sample is not None:
+                previous_total, previous_time = self._tokens_sample
+                elapsed = now - previous_time
+                if elapsed > 0 and total >= previous_total:
+                    metrics["tokens_per_s"] = round((total - previous_total) / elapsed, 1)
+            self._tokens_sample = (total, now)
+        else:
+            self._tokens_sample = None
+        metrics["sampled_at"] = time.time()
+        self.metrics = metrics
+        return metrics
 
     # ---------------------------------------------------------- relay socket
     async def _connection_loop(self):
@@ -172,6 +274,8 @@ class Agent:
             "started_at": self.started_at,
         }
         meta.update({k: v for k, v in self.vllm_meta.items() if k != "vllm_error"})
+        if self.metrics:
+            meta["metrics"] = dict(self.metrics)
         return meta
 
     async def _serve_once(self):
@@ -243,6 +347,12 @@ class Agent:
     async def _send_models(self):
         await self._send({"type": protocol.MODELS, "state": self.state, "models": self.models})
 
+    async def _send_status(self):
+        await self._send({
+            "type": protocol.STATUS, "state": self.state, "in_flight": len(self.in_flight),
+            "metrics": dict(self.metrics),
+        })
+
     async def _handle_frame(self, frame):
         kind = frame.get("type")
         if kind == protocol.REQUEST:
@@ -275,6 +385,8 @@ class Agent:
                 raise VLLMError(400, "request body must be a JSON object")
             if path not in protocol.FORWARDABLE_PATHS:
                 raise VLLMError(404, "path {0} is not forwarded by this agent".format(path))
+            if self.draining:
+                raise VLLMError(503, "the GPU agent is draining and accepts no new requests")
             if self.state != protocol.STATE_READY:
                 raise VLLMError(503, "vLLM is not ready on this GPU server ({0})".format(self.state))
             log.info(
@@ -296,12 +408,17 @@ class Agent:
                     {"type": protocol.RESPONSE, "request_id": request_id, "status": status, "body": response_body}
                 )
         except asyncio.CancelledError:
-            outcome = "cancelled"
-            self.requests_cancelled += 1
-            try:
-                await self._send({"type": protocol.CANCELLED, "request_id": request_id})
-            except RelayGone:
-                pass
+            if self._drain_abort:
+                outcome = "error 502"
+                self.requests_failed += 1
+                await self._send_error(request_id, 502, "the GPU agent drained before the request finished")
+            else:
+                outcome = "cancelled"
+                self.requests_cancelled += 1
+                try:
+                    await self._send({"type": protocol.CANCELLED, "request_id": request_id})
+                except RelayGone:
+                    pass
         except VLLMError as exc:
             outcome = "error {0}".format(exc.status)
             self.requests_failed += 1
@@ -350,6 +467,7 @@ class Agent:
                 "models": self.models,
                 "error": self.vllm_meta.get("vllm_error", ""),
                 "version": self.vllm_meta.get("vllm_version", ""),
+                "metrics": dict(self.metrics),
             },
             "requests": {
                 "in_flight": len(self.in_flight),
@@ -358,6 +476,8 @@ class Agent:
                 "failed": self.requests_failed,
                 "cancelled": self.requests_cancelled,
             },
+            "draining": self.draining,
+            "drain_started": self.drain_started,
         }
 
     async def _start_health_server(self):
@@ -368,9 +488,16 @@ class Agent:
             status = 200 if self.relay_connected else 503
             return web.json_response(self.snapshot(), status=status)
 
+        async def drain(request):
+            self.request_drain()
+            return web.json_response(
+                {"state": self.state, "draining": self.draining, "in_flight": len(self.in_flight)}, status=202
+            )
+
         app = web.Application()
         app.router.add_get("/", handler)
         app.router.add_get("/health", handler)
+        app.router.add_post("/drain", drain)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, self.config.health_host, self.config.health_port)

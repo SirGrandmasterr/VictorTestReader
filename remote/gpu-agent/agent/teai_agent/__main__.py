@@ -13,9 +13,12 @@ from .config import AgentConfig, ConfigError
 async def _main(config):
     agent = Agent(config)
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    # SIGINT (Ctrl-C) always stops at once; SIGTERM ("docker compose stop")
+    # drains first when AGENT_DRAIN_ON_TERM is on, so in-flight requests finish.
+    handlers = {signal.SIGINT: agent.request_stop, signal.SIGTERM: agent.handle_term}
+    for sig, handler in handlers.items():
         try:
-            loop.add_signal_handler(sig, agent.request_stop)
+            loop.add_signal_handler(sig, handler)
         except (NotImplementedError, RuntimeError):  # Windows / non-main thread
             pass
     await agent.run()

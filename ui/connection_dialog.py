@@ -1,16 +1,23 @@
-"""Dialog for choosing the backend and configuring the remote relay."""
+"""Dialog for choosing the backend and configuring the remote relay profiles."""
 
+import copy
 import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from core.remote_service import RemoteService, normalise_api_key
+from core.secrets import INSTALL_HINT, keyring_available
 from core.settings import BACKEND_LABELS, BACKEND_OLLAMA, BACKEND_REMOTE, UI_LANGUAGES
 from .i18n import LANGUAGE_LABELS, tr
 
 
 class ConnectionDialog(tk.Toplevel):
     """Edit backend/relay settings with a live connection test, plus UI preferences.
+
+    Relay connections are profiles: the combobox at the top of the relay box
+    picks the one the fields below edit; Add/Rename/Delete manage the list.
+    All profile edits happen on a draft copy of the settings and reach the
+    real object only through Save, so Cancel reverts them.
 
     Strings in this dialog are wrapped in ``tr()`` as the worked example for
     localisation; the other screens follow later.
@@ -19,6 +26,7 @@ class ConnectionDialog(tk.Toplevel):
     def __init__(self, parent, settings, on_save, remote_factory=None):
         super().__init__(parent)
         self.settings = settings
+        self.draft = copy.deepcopy(settings)  # profiles and model memory are edited here until Save
         self.on_save = on_save
         self.remote_factory = remote_factory or self._default_remote_factory
         self._test_token = 0
@@ -76,27 +84,41 @@ class ConnectionDialog(tk.Toplevel):
         self.remote_box.pack(fill=tk.X, pady=(10, 0))
         self.remote_box.columnconfigure(1, weight=1)
 
-        ttk.Label(self.remote_box, text=tr("Relay URL:")).grid(row=0, column=0, sticky="w")
-        self.url_var = tk.StringVar(value=self.settings.remote_url)
-        self.url_entry = ttk.Entry(self.remote_box, textvariable=self.url_var, width=46)
-        self.url_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(6, 0))
+        ttk.Label(self.remote_box, text=tr("Profile:")).grid(row=0, column=0, sticky="w")
+        profile_row = ttk.Frame(self.remote_box)
+        profile_row.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(6, 0))
+        self.profile_var = tk.StringVar(value=self.draft.active_profile)
+        self.profile_combo = ttk.Combobox(profile_row, textvariable=self.profile_var, state="readonly", width=22)
+        self.profile_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_selected)
+        self.add_button = ttk.Button(profile_row, text=tr("Add..."), command=self.add_profile, width=8)
+        self.add_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.rename_button = ttk.Button(profile_row, text=tr("Rename..."), command=self.rename_profile, width=9)
+        self.rename_button.pack(side=tk.LEFT, padx=(4, 0))
+        self.delete_button = ttk.Button(profile_row, text=tr("Delete"), command=self.delete_profile, width=7)
+        self.delete_button.pack(side=tk.LEFT, padx=(4, 0))
 
-        ttk.Label(self.remote_box, text=tr("API key:")).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        self.key_var = tk.StringVar(value=self.settings.remote_api_key)
+        ttk.Label(self.remote_box, text=tr("Relay URL:")).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.url_var = tk.StringVar(value="")
+        self.url_entry = ttk.Entry(self.remote_box, textvariable=self.url_var, width=46)
+        self.url_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(6, 0), pady=(8, 0))
+
+        ttk.Label(self.remote_box, text=tr("API key:")).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.key_var = tk.StringVar(value="")
         self.key_entry = ttk.Entry(self.remote_box, textvariable=self.key_var, show="•", width=36)
-        self.key_entry.grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+        self.key_entry.grid(row=2, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
         self.show_key_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             self.remote_box,
             text=tr("Show"),
             variable=self.show_key_var,
             command=self._toggle_key_visibility,
-        ).grid(row=1, column=2, sticky="w", padx=(6, 0), pady=(6, 0))
+        ).grid(row=2, column=2, sticky="w", padx=(6, 0), pady=(6, 0))
 
         ttk.Label(self.remote_box, text=tr("Max output tokens:")).grid(
-            row=2, column=0, sticky="w", pady=(6, 0)
+            row=3, column=0, sticky="w", pady=(6, 0)
         )
-        self.max_tokens_var = tk.StringVar(value=str(self.settings.remote_max_tokens))
+        self.max_tokens_var = tk.StringVar(value="")
         self.max_tokens_spin = ttk.Spinbox(
             self.remote_box,
             from_=256,
@@ -105,18 +127,36 @@ class ConnectionDialog(tk.Toplevel):
             textvariable=self.max_tokens_var,
             width=10,
         )
-        self.max_tokens_spin.grid(row=2, column=1, sticky="w", padx=(6, 0), pady=(6, 0))
+        self.max_tokens_spin.grid(row=3, column=1, sticky="w", padx=(6, 0), pady=(6, 0))
 
-        self.thinking_var = tk.BooleanVar(value=self.settings.remote_enable_thinking)
+        self.thinking_var = tk.BooleanVar(value=False)
         self.thinking_check = ttk.Checkbutton(
             self.remote_box,
             text=tr("Allow the model to think before answering (slower, may improve quality)"),
             variable=self.thinking_var,
         )
-        self.thinking_check.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.thinking_check.grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self._refresh_profile_list()
+        self._load_profile(self.draft.active_profile)
+
+        keyring_row = ttk.Frame(self.remote_box)
+        keyring_row.grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.keyring_available = keyring_available()
+        self.keyring_var = tk.BooleanVar(value=bool(self.draft.use_keyring))
+        self.keyring_check = ttk.Checkbutton(
+            keyring_row,
+            text=tr("Store keys in the system keyring (recommended)"),
+            variable=self.keyring_var,
+            command=self._update_storage_note,
+        )
+        self.keyring_check.pack(side=tk.LEFT)
+        if not self.keyring_available:
+            self.keyring_check.configure(state=tk.DISABLED)
+            ttk.Label(keyring_row, text=tr("(not available: {hint})", hint=INSTALL_HINT),
+                      foreground="#555555").pack(side=tk.LEFT, padx=(6, 0))
 
         test_row = ttk.Frame(self.remote_box)
-        test_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        test_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         self.test_button = ttk.Button(test_row, text=tr("Test connection"), command=self.test_connection)
         self.test_button.pack(side=tk.LEFT)
         self.test_status_var = tk.StringVar(value="")
@@ -133,7 +173,7 @@ class ConnectionDialog(tk.Toplevel):
             font=("Segoe UI", 9),
             state=tk.DISABLED,
         )
-        self.details.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.details.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
         preferences = ttk.LabelFrame(body, text=tr("Preferences"), padding=8)
         preferences.pack(fill=tk.X, pady=(10, 0))
@@ -155,21 +195,94 @@ class ConnectionDialog(tk.Toplevel):
             row=1, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
 
-        ttk.Label(
-            body,
-            text=tr(
-                "Settings are saved next to the application in "
-                "TextEnhanceAI-settings.json (the API key is stored in plain text)."
-            ),
-            wraplength=480,
-            foreground="#555555",
-        ).pack(anchor="w", pady=(10, 0))
+        self.storage_note_var = tk.StringVar(value="")
+        ttk.Label(body, textvariable=self.storage_note_var, wraplength=480, foreground="#555555").pack(
+            anchor="w", pady=(10, 0)
+        )
+        self._update_storage_note()
 
         buttons = ttk.Frame(body)
         buttons.pack(fill=tk.X, pady=(12, 0))
         ttk.Button(buttons, text=tr("Cancel"), command=self.destroy).pack(side=tk.RIGHT)
         self.save_button = ttk.Button(buttons, text=tr("Save"), command=self.save, style="Primary.TButton")
         self.save_button.pack(side=tk.RIGHT, padx=(0, 6))
+
+    # -------------------------------------------------------------- profiles
+    def _refresh_profile_list(self):
+        names = self.draft.profile_names()
+        self.profile_combo.configure(values=names)
+        self.profile_var.set(self.draft.active_profile)
+        self.delete_button.configure(state=tk.NORMAL if len(names) > 1 else tk.DISABLED)
+
+    def _load_profile(self, name):
+        """Show ``name``'s fields; it becomes the draft's active profile."""
+        self.draft.set_active_profile(name)
+        profile = self.draft.profile
+        self.url_var.set(profile["url"])
+        self.key_var.set(profile["api_key"])
+        self.max_tokens_var.set(str(profile["max_tokens"]))
+        self.thinking_var.set(profile["enable_thinking"])
+        self.profile_var.set(profile["name"])
+
+    def _store_fields(self):
+        """Write the fields into the draft's active profile."""
+        self.draft.remote_url = self.url_var.get().strip()
+        self.draft.remote_api_key = self._current_api_key()
+        self.draft.remote_max_tokens = self._current_max_tokens()
+        self.draft.remote_enable_thinking = bool(self.thinking_var.get())
+
+    def _on_profile_selected(self, event=None):
+        self._store_fields()
+        self._load_profile(self.profile_var.get())
+        self.test_status_var.set("")
+        self._set_details("")
+
+    def _ask_name(self, title, prompt, initial=""):
+        name = simpledialog.askstring(title, prompt, initialvalue=initial, parent=self)
+        if name is None:
+            return None
+        name = " ".join(name.split())
+        if not name:
+            messagebox.showerror(title, tr("Enter a name for the profile."), parent=self)
+            return None
+        return name
+
+    def add_profile(self):
+        name = self._ask_name(tr("Add profile"), tr("Name of the new relay profile:"))
+        if name is None:
+            return
+        self._store_fields()
+        if self.draft.add_profile(name) is None:
+            messagebox.showerror(tr("Add profile"), tr("A profile called {name} already exists.", name=name), parent=self)
+            return
+        self._refresh_profile_list()
+        self._load_profile(name)
+        self._refresh_profile_list()
+        self.url_entry.focus_set()
+
+    def rename_profile(self):
+        current = self.draft.active_profile
+        name = self._ask_name(tr("Rename profile"), tr("New name for {name}:", name=current), initial=current)
+        if name is None or name == current:
+            return
+        if not self.draft.rename_profile(current, name):
+            messagebox.showerror(tr("Rename profile"), tr("A profile called {name} already exists.", name=name), parent=self)
+            return
+        self._refresh_profile_list()
+
+    def delete_profile(self):
+        current = self.draft.active_profile
+        if len(self.draft.remote_profiles) <= 1:
+            return
+        if not messagebox.askyesno(
+            tr("Delete profile"), tr("Delete the relay profile {name}?", name=current), parent=self
+        ):
+            return
+        self.draft.delete_profile(current)
+        self._refresh_profile_list()
+        self._load_profile(self.draft.active_profile)
+        self.test_status_var.set("")
+        self._set_details("")
 
     # --------------------------------------------------------------- actions
     def _language_label(self, code):
@@ -195,6 +308,22 @@ class ConnectionDialog(tk.Toplevel):
     def _toggle_key_visibility(self):
         self.key_entry.configure(show="" if self.show_key_var.get() else "•")
 
+    def _keyring_selected(self):
+        return self.keyring_available and bool(self.keyring_var.get())
+
+    def _update_storage_note(self):
+        """The plain-text warning is shown only while the keys are going to live in the file."""
+        if self._keyring_selected():
+            self.storage_note_var.set(tr(
+                "Settings are saved next to the application in TextEnhanceAI-settings.json; "
+                "the relay API keys are kept in the system keyring."
+            ))
+        else:
+            self.storage_note_var.set(tr(
+                "Settings are saved next to the application in "
+                "TextEnhanceAI-settings.json (the API key is stored in plain text)."
+            ))
+
     def _update_remote_state(self):
         remote = self.backend_var.get() == BACKEND_REMOTE
         state = tk.NORMAL if remote else tk.DISABLED
@@ -204,8 +333,15 @@ class ConnectionDialog(tk.Toplevel):
             self.max_tokens_spin,
             self.thinking_check,
             self.test_button,
+            self.add_button,
+            self.rename_button,
         ):
             widget.configure(state=state)
+        self.keyring_check.configure(state=state if self.keyring_available else tk.DISABLED)
+        self.profile_combo.configure(state="readonly" if remote else tk.DISABLED)
+        self.delete_button.configure(
+            state=tk.NORMAL if remote and len(self.draft.remote_profiles) > 1 else tk.DISABLED
+        )
 
     def _set_details(self, text):
         self.details.configure(state=tk.NORMAL)
@@ -219,7 +355,7 @@ class ConnectionDialog(tk.Toplevel):
         try:
             value = int(self.max_tokens_var.get().strip())
         except ValueError:
-            return self.settings.remote_max_tokens
+            return self.draft.remote_max_tokens
         value = min(self.MAX_OUTPUT_TOKENS, max(256, value))
         self.max_tokens_var.set(str(value))
         return value
@@ -292,11 +428,13 @@ class ConnectionDialog(tk.Toplevel):
             self.test_status_var.set(tr("Enter the relay URL before saving."))
             self.test_status_label.configure(foreground="#9b1c1c")
             return
+        self._store_fields()
         self.settings.backend = backend
-        self.settings.remote_url = url
-        self.settings.remote_api_key = self._current_api_key()
-        self.settings.remote_max_tokens = self._current_max_tokens()
-        self.settings.remote_enable_thinking = bool(self.thinking_var.get())
+        self.settings.remote_profiles = [dict(profile) for profile in self.draft.remote_profiles]
+        self.settings.active_profile = self.draft.active_profile  # the selected profile becomes active
+        self.settings.models = dict(self.draft.models)  # renamed/deleted profiles took their model memory along
+        if self.keyring_available:
+            self.settings.use_keyring = bool(self.keyring_var.get())  # save() migrates the keys either way
         self.destroy()
         self.on_save(self.settings)
 

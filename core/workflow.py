@@ -25,7 +25,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .backend import BackendUnavailable, EditCancelled, OutputTruncated, StructuredOutputUnsupported
+from .backend import (
+    BackendUnavailable,
+    EditCancelled,
+    OutputTruncated,
+    StructuredOutputUnsupported,
+    add_usage,
+    empty_usage,
+    format_usage,
+    normalise_usage,
+)
 from .change_kinds import CHANGE_KIND_LABELS, CHANGE_KINDS, classify_change, edit_distance
 from .chunking import (
     DEFAULT_MAX_CHAPTER_CHARS,
@@ -551,6 +560,8 @@ class Project:
     consistency: list = field(default_factory=list)  # consistency.Finding objects, see core/consistency.py
     # source format and paragraph locators (documents.LoadedDocument.to_dict without the text)
     document: dict = field(default_factory=lambda: {"kind": KIND_TXT, "paragraphs": [], "meta": {}})
+    # token counts summed over every request made for this project (see backend.empty_usage)
+    usage: dict = field(default_factory=empty_usage)
     root: Optional[Path] = field(default=None, repr=False, compare=False)
     source_check_reason: str = field(default="", repr=False, compare=False)  # set by source_changed()
 
@@ -558,6 +569,11 @@ class Project:
     @property
     def document_kind(self):
         return self.document.get("kind") or KIND_TXT
+
+    def add_usage(self, record):
+        """Add the token counts of one request (a ``backend.UsageRecord``) to the project total."""
+        add_usage(self.usage, record)
+        return self.usage
 
     def original_text(self):
         """The manuscript text this project was split from (chapters concatenate back to it)."""
@@ -915,6 +931,7 @@ class Project:
             "source_mtime": self.source_mtime,
             "consistency": [finding.to_dict() for finding in self.consistency],
             "document": LoadedDocument.from_dict(self.document).to_dict(),
+            "usage": normalise_usage(self.usage),
         }
 
     @classmethod
@@ -939,6 +956,7 @@ class Project:
             source_mtime=float(data.get("source_mtime") or 0.0),
             consistency=findings,
             document=LoadedDocument.from_dict(data.get("document")).to_dict(),  # format 1 files: plain text
+            usage=normalise_usage(data.get("usage")),  # older files: zeros
             root=root,
         )
 
@@ -1054,6 +1072,7 @@ class Project:
             lines.append("  - Author's corrections: {0}".format(stats["per_check"][CHECK_AUTHOR]["changes"]))
         if stats["edited"]:
             lines.append("  - Suggestions reworded by the author: {0}".format(stats["edited"]))
+        lines.append("- Usage: {0}".format(usage_line(self.usage)))
         lines.append("")
         for chapter in self.chapters:
             lines.append("## {0}. {1}\n".format(chapter.index, chapter.title))
@@ -1085,6 +1104,14 @@ class Project:
 def _inline(text):
     text = text.replace("`", "'").replace("\n", "↵")
     return text if text else "∅"
+
+
+def usage_line(usage):
+    """The report's usage line: full numbers, or a note when the backend reported none."""
+    totals = normalise_usage(usage)
+    if not totals["requests"]:
+        return "no token counts reported"
+    return format_usage(totals, compact=False)
 
 
 # ------------------------------------------------------------ diff/merge
@@ -1832,7 +1859,7 @@ def sanity_check_proposal(original, proposed):
         )
 
 
-def evaluate(service, model, text, check, cancel_event, retries=1, style_guide="", glossary=None):
+def evaluate(service, model, text, check, cancel_event, retries=1, style_guide="", glossary=None, on_usage=None):
     """Run the edit request of one check on one segment; returns a CheckResult without explanations.
 
     Edits are requested with ``text_first=True``: the segment comes before the
@@ -1841,7 +1868,9 @@ def evaluate(service, model, text, check, cancel_event, retries=1, style_guide="
     holds the author's standing instructions; they are appended to the check's
     instruction. ``glossary`` lists protected terms: they are named in the
     prompt and any change touching one is moved to ``CheckResult.suppressed``
-    instead of being proposed. Never raises except on cancel.
+    instead of being proposed. ``on_usage`` is handed to the backend and
+    receives the token counts of every request, retries included. Never raises
+    except on cancel.
     """
     started = time.time()
     attempt = 0
@@ -1849,7 +1878,7 @@ def evaluate(service, model, text, check, cancel_event, retries=1, style_guide="
     while True:
         try:
             proposed = strip_fences(
-                service.stream_edit(model, instruction, text, cancel_event, text_first=True)
+                service.stream_edit(model, instruction, text, cancel_event, text_first=True, on_usage=on_usage)
             ).strip("\n")
             sanity_check_proposal(text, proposed)
             break
@@ -1882,7 +1911,8 @@ def finish_explanations(result):
     return result
 
 
-def request_explanations(service, model, entries, check, cancel_event, language=SAME_LANGUAGE, style_guide=""):
+def request_explanations(service, model, entries, check, cancel_event, language=SAME_LANGUAGE, style_guide="",
+                         on_usage=None):
     """Ask the model to explain the changes of one or more segments; returns {number: text}.
 
     ``entries`` is a list of ``(segment_text, changes)``; numbers continue
@@ -1894,7 +1924,7 @@ def request_explanations(service, model, entries, check, cancel_event, language=
     try:
         answer = service.generate(
             model, build_grouped_explanation_messages(entries, check, language, style_guide), cancel_event,
-            max_tokens=EXPLANATION_MAX_TOKENS,
+            max_tokens=EXPLANATION_MAX_TOKENS, on_usage=on_usage,
         )
     except EditCancelled:
         raise
@@ -1910,30 +1940,31 @@ def distribute_explanations(changes, numbered):
             change.explanation = numbered[number]
 
 
-def explain_result(service, model, text, result, cancel_event, language=SAME_LANGUAGE, style_guide=""):
+def explain_result(service, model, text, result, cancel_event, language=SAME_LANGUAGE, style_guide="", on_usage=None):
     """Explain the changes of one evaluated result: canned sentences first, one request for the rest."""
     remaining = apply_canned_explanations(text, result.changes, language)
     if remaining:
         numbered = request_explanations(
-            service, model, [(text, remaining)], result.check, cancel_event, language, style_guide
+            service, model, [(text, remaining)], result.check, cancel_event, language, style_guide, on_usage=on_usage
         )
         distribute_explanations(remaining, numbered)
     return finish_explanations(result)
 
 
 def run_check(service, model, text, check, cancel_event, explain=True, language=SAME_LANGUAGE, retries=1,
-              style_guide="", glossary=None):
+              style_guide="", glossary=None, on_usage=None):
     """Evaluate one check on one segment and explain its changes; returns a CheckResult.
 
     Convenience wrapper around ``evaluate`` and ``explain`` for callers that
     want one result per call (the combined-mode fallback, scripts, tests).
     The runner uses the two steps separately so explanations can be batched.
+    ``on_usage`` receives the token counts of every request made.
     """
-    result = evaluate(service, model, text, check, cancel_event, retries, style_guide, glossary)
+    result = evaluate(service, model, text, check, cancel_event, retries, style_guide, glossary, on_usage=on_usage)
     if result.status != "done":
         return result
     if explain:
-        return explain_result(service, model, text, result, cancel_event, language, style_guide)
+        return explain_result(service, model, text, result, cancel_event, language, style_guide, on_usage=on_usage)
     return finish_explanations(result)
 
 
@@ -2054,13 +2085,14 @@ def parse_combined(text, answer, options=None):
 
 
 def run_segment_combined(service, model, text, options, cancel_event, structured=True,
-                         on_structured_unsupported=None):
+                         on_structured_unsupported=None, on_usage=None):
     """Evaluate every enabled check of one segment with a single request.
 
     Falls back to ``run_check`` per check (results marked ``separate``) when
     the answer cannot be parsed or anchored, when the backend fails, or when
     it rejects the JSON schema; in the last case ``on_structured_unsupported``
     is called so the runner can stop asking for structured output.
+    ``on_usage`` receives the token counts of every request made.
     """
     started = time.time()
     checks = options.enabled_checks() or list(CHECKS)
@@ -2069,7 +2101,7 @@ def run_segment_combined(service, model, text, options, cancel_event, structured
     try:
         answer = service.generate(
             model, messages, cancel_event, max_tokens=COMBINED_MAX_TOKENS,
-            response_format=COMBINED_SCHEMA if structured else None,
+            response_format=COMBINED_SCHEMA if structured else None, on_usage=on_usage,
         )
         results = parse_combined(text, strip_fences(answer), options)
     except EditCancelled:
@@ -2089,6 +2121,7 @@ def run_segment_combined(service, model, text, options, cancel_event, structured
         check: run_check(
             service, model, text, check, cancel_event, explain=options.explain,
             language=options.language, style_guide=options.style_guide, glossary=options.glossary,
+            on_usage=on_usage,
         )
         for check in checks
     }
@@ -2100,8 +2133,11 @@ class ProjectRunner:
     Events: ``("workflow_started", chapter_index, segment_index, check)`` when
     a task begins, ``("workflow_result", chapter_index, segment_index, check,
     CheckResult)`` followed by ``("workflow_progress", done, total, running)``
-    when it ends, and finally ``("workflow_finished", cancelled)``. The caller applies results to the
-    project on its own thread, so the runner never mutates project state.
+    when it ends, and finally ``("workflow_finished", cancelled)``. Every
+    request whose token counts the backend reports also produces
+    ``("workflow_usage", UsageRecord)``, which the caller adds to
+    ``Project.usage``. The caller applies results to the project on its own
+    thread, so the runner never mutates project state.
 
     In combined mode a task covers a whole segment: one request answers every
     pending check, and the runner still emits one ``workflow_started`` and one
@@ -2238,6 +2274,10 @@ class ProjectRunner:
     def _emit_result(self, chapter_index, segment_index, check, result):
         self._emit_results(chapter_index, segment_index, {check: result})
 
+    def _report_usage(self, record):
+        """Backend callback (worker thread): hand the token counts to the UI thread."""
+        self.events.put(("workflow_usage", record))
+
     def cancel(self):
         self.cancel_event.set()
 
@@ -2284,12 +2324,14 @@ class ProjectRunner:
                             self.service, self.model, segment.text, options, self.cancel_event,
                             structured=self.structured_output,
                             on_structured_unsupported=self._disable_structured_output,
+                            on_usage=self._report_usage,
                         )
                         results = {pending: results[pending] for pending in checks}
                     else:
                         result = evaluate(
                             self.service, self.model, segment.text, check, self.cancel_event,
                             style_guide=options.style_guide, glossary=options.glossary,
+                            on_usage=self._report_usage,
                         )
                         if result.status == "done" and self.batches_explanations:
                             remaining = apply_canned_explanations(segment.text, result.changes, options.language)
@@ -2390,6 +2432,7 @@ class ProjectRunner:
                         numbered = request_explanations(
                             self.service, self.model, [(text, remaining) for _, _, _, _, remaining, text in chunk],
                             check, self.cancel_event, options.language, options.style_guide,
+                            on_usage=self._report_usage,
                         )
                     except EditCancelled:
                         numbered = {}

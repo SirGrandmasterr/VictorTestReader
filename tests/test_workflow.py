@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from core.backend import BackendUnavailable, EditCancelled, OutputTruncated, StructuredOutputUnsupported
+from core.backend import (
+    BackendUnavailable,
+    EditCancelled,
+    OutputTruncated,
+    StructuredOutputUnsupported,
+    UsageRecord,
+    empty_usage,
+)
 from core.models import ACCEPTED, PENDING, REJECTED
 from core.change_kinds import CHANGE_KIND_LABELS, CHANGE_KINDS, levenshtein
 from core.workflow import (
@@ -325,16 +332,21 @@ class FakeService:
 
     display_name = "fake"
 
-    def __init__(self, fail_first=0, truncate=False, delay=0.0):
+    def __init__(self, fail_first=0, truncate=False, delay=0.0, usage=None):
         self.calls = []
         self.instructions = []  # full instruction of every edit request
         self.prompts = []  # full user message of every explanation request
         self.fail_first = fail_first
         self.truncate = truncate
         self.delay = delay
+        self.usage = usage  # (prompt_tokens, completion_tokens) reported for every answered request
         self.lock = threading.Lock()
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False):
+    def _report(self, on_usage, model):
+        if on_usage is not None and self.usage is not None:
+            on_usage(UsageRecord(self.usage[0], self.usage[1], 0.5, model))
+
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
         with self.lock:
             self.calls.append(("edit", instruction[:20], text, text_first))
             self.instructions.append(instruction)
@@ -346,14 +358,16 @@ class FakeService:
         if self.delay:
             if cancel_event.wait(self.delay):
                 raise EditCancelled("cancelled")
+        self._report(on_usage, model)
         if instruction.startswith("Correct spelling"):
             return text.replace("teh", "the").replace("Teh", "The")
         if instruction.startswith("Fix grammar"):
             return text.replace("were", "was")
         return "```\n" + text.replace("very very", "extremely") + "\n```"
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
         content = messages[1]["content"]
+        self._report(on_usage, model)
         if content.startswith("Review the text below"):
             with self.lock:
                 self.calls.append(("combined", content[:20], response_format is not None))
@@ -683,7 +697,7 @@ def test_flags_persist_and_default_to_empty():
 class InventingService(FakeService):
     """Fake backend whose expression check appends a clause the text never had."""
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
         if instruction.startswith("Improve expression"):
             return text.replace("It run fast.", "It run fast, chasing the stranger.")
         return super().stream_edit(model, instruction, text, cancel_event, on_progress, text_first)
@@ -1213,7 +1227,7 @@ def test_language_heuristic_and_setting_mapping():
 class CommaService(FakeService):
     """Grammar check that only inserts a comma (a canned kind); spelling fixes two letters."""
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
         with self.lock:
             self.calls.append(("edit", instruction[:20], text, text_first))
             self.instructions.append(instruction)
@@ -1245,7 +1259,7 @@ def test_explanation_request_is_skipped_when_every_change_is_canned():
 
 def test_explained_is_true_only_when_no_fallback_remains():
     class SilentService(FakeService):
-        def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None):
+        def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
             self.prompts.append(messages[1]["content"])
             return "{}"  # the model answered nothing useful
 
@@ -1316,7 +1330,7 @@ def test_explainer_batches_by_check_and_distributes_answers(tmp_path):
 class SlowExplainService(FakeService):
     """Explanations take a moment so evaluations pile up and get grouped."""
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
         if not messages[1]["content"].startswith("Review the text below"):
             if cancel_event.wait(0.15):
                 raise EditCancelled("cancelled")
@@ -1360,7 +1374,7 @@ class BlockingExplainService(FakeService):
         super().__init__()
         self.explaining = threading.Event()
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
         if not messages[1]["content"].startswith("Review the text below"):
             self.explaining.set()
             if cancel_event.wait(10):
@@ -1394,6 +1408,66 @@ def test_cancel_during_the_explain_stage_finishes_cleanly(tmp_path):
     assert any(not r.explained for _, s in project.all_segments() for r in s.results.values() if r.changes)
     # ... and the project is consistent: every emitted result is stored, the rest is simply pending
     assert len(results) + len(project.pending_tasks()) == runner.total
+
+
+def _subdir(tmp_path, name):
+    path = tmp_path / name
+    path.mkdir()
+    return path
+
+
+def test_runner_reports_usage_per_request_and_the_project_sums_it(tmp_path):
+    project = make_project(tmp_path)
+    assert project.usage == empty_usage()
+    events = queue.Queue()
+    service = FakeService(usage=(100, 20))
+    runner = ProjectRunner(project, service, "m", events, parallelism=2)
+    runner.start()
+    collected = drain(events)
+
+    usage_events = [event for event in collected if event[0] == "workflow_usage"]
+    requests = len(service.calls)  # every edit and explanation request reported once
+    assert requests > 3
+    assert len(usage_events) == requests
+    for _, record in usage_events:
+        project.add_usage(record)
+    assert project.usage == {
+        "prompt_tokens": 100 * requests, "completion_tokens": 20 * requests, "requests": requests,
+        "seconds": 0.5 * requests,
+    }
+
+    project.save()
+    reloaded = Project.load(project.root)
+    assert reloaded.usage == project.usage
+    report = reloaded.build_report()
+    assert "- Usage: {0:,} tokens ({1:,} in, {2:,} out) \u00b7 {3} requests \u00b7 40 tok/s".format(
+        120 * requests, 100 * requests, 20 * requests, requests
+    ) in report
+
+    # combined mode reports the single request per segment, too
+    combined = make_project(_subdir(tmp_path, "c"), evaluation_mode=EVALUATION_COMBINED)
+    events = queue.Queue()
+    service = FakeService(usage=(300, 50))
+    ProjectRunner(combined, service, "m", events, parallelism=1).start()
+    collected = drain(events)
+    assert len([e for e in collected if e[0] == "workflow_usage"]) == len(service.calls)
+
+
+def test_usage_is_optional_in_saved_projects(tmp_path):
+    project = make_project(tmp_path)
+    data = project.to_dict()
+    assert data["usage"] == empty_usage()
+    del data["usage"]  # a project saved before token accounting existed
+    assert Project.from_dict(data, root=project.root).usage == empty_usage()
+    data["usage"] = {"prompt_tokens": "12", "requests": 2}  # partial or stringly-typed: tolerated
+    loaded = Project.from_dict(data, root=project.root)
+    assert loaded.usage == {"prompt_tokens": 12, "completion_tokens": 0, "requests": 2, "seconds": 0.0}
+    assert "- Usage: no token counts reported" in make_project(_subdir(tmp_path, "n")).build_report()
+
+    # a backend that reports nothing leaves the total untouched
+    events = queue.Queue()
+    ProjectRunner(make_project(_subdir(tmp_path, "q")), FakeService(), "m", events).start()
+    assert not [e for e in drain(events) if e[0] == "workflow_usage"]
 
 
 def test_runner_with_nothing_to_do_finishes_immediately(tmp_path):

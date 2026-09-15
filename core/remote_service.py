@@ -13,6 +13,7 @@ import socket
 import ssl
 import sys
 import threading
+import time
 from urllib.parse import urlsplit
 
 from .backend import (
@@ -22,13 +23,15 @@ from .backend import (
     BackendUnavailable,
     EditCancelled,
     OutputTruncated,
+    UsageRecord,
     build_messages,
     strip_thinking,
     truncated_message,
 )
 from .backend import StructuredOutputUnsupported as _StructuredOutputUnsupported
+from . import __version__
 
-USER_AGENT = "TextEnhanceAI/0.13"
+USER_AGENT = "TextEnhanceAI/" + __version__
 DEFAULT_TIMEOUT = 120  # seconds per blocking socket operation; relay keeps alive every 15s
 _SERVER_AUTH_OID = "1.3.6.1.5.5.7.3.1"
 
@@ -67,6 +70,34 @@ def build_ssl_context():
     return ssl.create_default_context()
 
 
+def relay_throughput(status):
+    """Sum the per-agent throughput fields of a relay ``/status`` document.
+
+    Returns ``{"chunks_per_s": float, "queued": int, "in_flight": int}`` or
+    None when the document carries no throughput fields (older relay, plain
+    OpenAI-compatible server, no agents).
+    """
+    agents = (status or {}).get("agents") if isinstance(status, dict) else None
+    if not agents:
+        return None
+    totals = {"chunks_per_s": 0.0, "queued": 0, "in_flight": 0}
+    found = False
+    for agent in agents:
+        if not isinstance(agent, dict) or "chunks_per_s" not in agent:
+            continue
+        found = True
+        try:
+            totals["chunks_per_s"] += float(agent.get("chunks_per_s") or 0)
+            totals["queued"] += int(agent.get("queued") or 0)
+            totals["in_flight"] += int(agent.get("in_flight") or 0)
+        except (TypeError, ValueError):
+            continue
+    if not found:
+        return None
+    totals["chunks_per_s"] = round(totals["chunks_per_s"], 1)
+    return totals
+
+
 class RemoteUnavailable(BackendUnavailable):
     """Raised when the relay cannot be reached, rejects us, or fails a request."""
 
@@ -98,6 +129,7 @@ class RemoteService:
         self.enable_thinking = enable_thinking
         self.timeout = timeout
         self.last_status = None
+        self.last_usage = None  # UsageRecord of the last completed request, when reported
         self._parsed = None
         if self.base_url:
             self._parsed = self._parse_url(self.base_url)
@@ -288,6 +320,9 @@ class RemoteService:
             "model": model,
             "messages": messages,
             "stream": True,
+            # The final chunk then carries the token counts (OpenAI/vLLM); servers
+            # without the option simply omit it.
+            "stream_options": {"include_usage": True},
             "max_tokens": max_tokens or self.max_tokens,
             "temperature": TEMPERATURE,
             "top_p": TOP_P,
@@ -363,12 +398,28 @@ class RemoteService:
         if data_lines:
             yield "\n".join(data_lines)
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None):
+    @staticmethod
+    def _parse_usage(payload):
+        """Return ``(prompt_tokens, completion_tokens)`` from an OpenAI ``usage`` object, or None."""
+        if not isinstance(payload, dict):
+            return None
+        try:
+            prompt = int(payload.get("prompt_tokens") or 0)
+            completion = int(payload.get("completion_tokens") or 0)
+        except (TypeError, ValueError):
+            return None
+        return prompt, completion
+
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None,
+                 on_usage=None):
         """Stream one chat completion and return its text, honoring cancellation.
 
         ``response_format`` (a JSON schema dict) is sent as an OpenAI-style
         ``json_schema`` response format; a 400 that mentions it raises
         ``StructuredOutputUnsupported`` so callers can stop asking for it.
+        ``on_usage`` receives a ``UsageRecord`` when the final chunk carries a
+        ``usage`` object (requested through ``stream_options``); that chunk
+        may have no ``choices`` at all.
         """
         self._require_config()
         if cancel_event.is_set():
@@ -382,6 +433,8 @@ class RemoteService:
         chunks = []
         received = 0
         finish_reason = None
+        usage = None
+        started = time.time()
         try:
             try:
                 headers = self._headers(json_body=True)
@@ -408,6 +461,8 @@ class RemoteService:
                         error = event["error"]
                         message = error.get("message") if isinstance(error, dict) else str(error)
                         raise RemoteUnavailable("Relay error: {0}".format(message))
+                    if event.get("usage"):
+                        usage = self._parse_usage(event["usage"]) or usage
                     for choice in event.get("choices") or []:
                         delta = choice.get("delta") or {}
                         content = delta.get("content")
@@ -438,17 +493,23 @@ class RemoteService:
 
         if cancel_event.is_set():
             raise EditCancelled("Editing was cancelled.")
+        if usage is not None:
+            self.last_usage = UsageRecord(usage[0], usage[1], time.time() - started, model)
+            if on_usage:
+                on_usage(self.last_usage)
         if finish_reason == "length":
             raise OutputTruncated(truncated_message(model))
         return strip_thinking("".join(chunks))
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False,
+                    on_usage=None):
         """Return the edited document, honoring cancellation mid-stream.
 
         ``text_first`` is passed to ``build_messages`` (prefix-cache friendly ordering).
         """
         result = self.generate(
-            model, build_messages(instruction, text, text_first), cancel_event, on_progress=on_progress
+            model, build_messages(instruction, text, text_first), cancel_event, on_progress=on_progress,
+            on_usage=on_usage,
         )
         if not result.strip():
             raise RemoteUnavailable("The remote model returned an empty response.")

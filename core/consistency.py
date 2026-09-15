@@ -584,8 +584,10 @@ class ConsistencyRunner:
     Events: ``("consistency_verdicts", {id: verdict})`` after every batch,
     followed by ``("consistency_progress", done, total)``, and finally
     ``("consistency_finished", all_verdicts, error)`` (``error`` is None
-    unless a request failed; a cancelled run finishes without error). The
-    caller applies the verdicts to the project's findings on its own thread.
+    unless a request failed; a cancelled run finishes without error). Token
+    counts arrive as ``("workflow_usage", UsageRecord)`` like the evaluation
+    runner's. The caller applies the verdicts to the project's findings on
+    its own thread.
     """
 
     def __init__(self, project, findings, service, model, events, max_tokens=2048):
@@ -616,6 +618,9 @@ class ConsistencyRunner:
     def cancel(self):
         self.cancel_event.set()
 
+    def _report_usage(self, record):
+        self.events.put(("workflow_usage", record))
+
     def _run(self):
         collected = {}
         error = None
@@ -624,7 +629,8 @@ class ConsistencyRunner:
                 break
             try:
                 answer = self.service.generate(self.model, build_consistency_messages(self.project, batch),
-                                               self.cancel_event, max_tokens=self.max_tokens)
+                                               self.cancel_event, max_tokens=self.max_tokens,
+                                               on_usage=self._report_usage)
             except EditCancelled:
                 break
             except Exception as exc:  # the UI reports it; the findings stay unverified

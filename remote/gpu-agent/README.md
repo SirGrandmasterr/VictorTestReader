@@ -89,12 +89,52 @@ curl -s http://127.0.0.1:8000/v1/models
 | `AGENT_RECONNECT_MAX_DELAY`  | 30 s                | Reconnect backoff ceiling                            |
 | `AGENT_TLS_VERIFY`           | true                | Set `false` only for a self-signed relay certificate |
 | `AGENT_LOG_LEVEL`            | INFO                | `DEBUG` for frame-level detail                       |
+| `AGENT_STATUS_INTERVAL`      | 10 s                | vLLM metrics scrape / status frame interval          |
+| `AGENT_DRAIN_ON_TERM`        | true                | `SIGTERM` drains instead of stopping at once         |
+| `AGENT_DRAIN_TIMEOUT`        | 600 s               | A drain aborts what is still running after this      |
 | `VLLM_BASE_URL`              | `http://vllm:8000`  | Set by compose                                       |
 | `VLLM_API_KEY`               | —                   | Only if vLLM runs with `--api-key`                   |
 
 `curl http://127.0.0.1:8090/health` returns the agent's view (relay connection,
-vLLM state and models, in-flight requests). HTTP 200 means connected to the
-relay, 503 means not; Docker's healthcheck uses the same endpoint.
+vLLM state and models, in-flight requests, the last vLLM metrics, drain
+state). HTTP 200 means connected to the relay, 503 means not; Docker's
+healthcheck uses the same endpoint.
+
+### GPU metrics
+
+Every `AGENT_STATUS_INTERVAL` seconds the agent reads vLLM's Prometheus
+`/metrics` (`num_requests_running`, `num_requests_waiting`,
+`gpu_cache_usage_perc`, `generation_tokens_total`, from which it derives
+`tokens_per_s`) and sends them to the relay in a `status` frame. They appear
+in the relay's `/status` (`agents[].metrics`) and on its admin page; a vLLM
+without `/metrics` simply reports none.
+
+### Drain mode: restart vLLM without failing user requests
+
+`docker compose stop agent` sends `SIGTERM`, which drains the agent: it tells
+the relay it is `draining` (no new requests are routed to it, its models
+disappear from the list), finishes the requests that are running, then exits.
+`stop_grace_period: 660s` in `docker-compose.yml` gives it time to do so
+(`AGENT_DRAIN_TIMEOUT` + a margin; requests still running after the timeout
+are aborted with 502). The same can be triggered without stopping the
+container:
+
+```bash
+curl -X POST http://127.0.0.1:8090/drain      # {"state": "draining", "in_flight": 2}
+curl http://127.0.0.1:8090/health             # "draining": true, in_flight counts down
+```
+
+To restart vLLM (new model, new flags) while users keep working on another
+GPU server, or at least without losing the requests in flight:
+
+```bash
+docker compose stop agent                     # drain: in-flight requests finish, then the agent exits
+docker compose restart vllm                   # or edit .env and: docker compose up -d vllm
+docker compose start agent                    # reconnects, reports "loading" until vLLM is ready
+```
+
+With `AGENT_DRAIN_ON_TERM=false` the agent stops immediately on `SIGTERM`
+and in-flight requests fail with 502 (the behaviour before drain mode).
 
 ## Run the agent without Docker
 

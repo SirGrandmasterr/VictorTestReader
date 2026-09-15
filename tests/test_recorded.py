@@ -221,7 +221,7 @@ class ScriptedBackend:
     def no_models_hint(self):
         return "none"
 
-    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None):
+    def generate(self, model, messages, cancel_event, on_progress=None, max_tokens=None, response_format=None, on_usage=None):
         self.generate_calls += 1
         if self.fail_first > 0:
             self.fail_first -= 1
@@ -238,7 +238,7 @@ class ScriptedBackend:
         count = user.count("→")
         return json.dumps({str(n): "Because {0}".format(n) for n in range(1, count + 1)})
 
-    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False):
+    def stream_edit(self, model, instruction, text, cancel_event, on_progress=None, text_first=False, on_usage=None):
         return self.generate(model, build_messages(instruction, text, text_first), cancel_event)
 
 
