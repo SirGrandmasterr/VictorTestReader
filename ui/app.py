@@ -34,20 +34,24 @@ from core.settings import (
     BACKEND_OLLAMA,
     BACKEND_REMOTE,
     SETTINGS_FILENAME,
+    UI_SCALE_STEP,
     AppSettings,
+    clamp_ui_scale,
 )
 from core.text_positions import char_offset, normalise_span, tk_index
 from .connection_dialog import ConnectionDialog
 from .i18n import current_language, resolve_language, set_language, tr
 from .mode_dialog import ManageModesDialog
 from .review_panel import ReviewPanel
-from .theme import PALETTE, Tooltip, apply_theme, font, style_text
+from .theme import PALETTE, Tooltip, apply_theme, font, style_text, subscribe
 from .workflow_screen import WorkflowScreen
 
-COLOR_OK = PALETTE["success"]
-COLOR_WARN = PALETTE["warning"]
-COLOR_ERROR = PALETTE["danger"]
-COLOR_NEUTRAL = PALETTE["header_muted"]
+# connection label states (colour plus a glyph, see _set_connection)
+COLOR_OK = "ok"
+COLOR_WARN = "warn"
+COLOR_ERROR = "error"
+COLOR_NEUTRAL = "neutral"
+CONNECTION_GLYPHS = {COLOR_OK: "\u25cf", COLOR_WARN: "\u26a0", COLOR_ERROR: "\u2716", COLOR_NEUTRAL: "\u25cb"}
 MODE_QUICK = "quick"
 MODE_AUTO = "auto"
 SEPARATOR_CUSTOM = "\u2014 Custom modes \u2014"  # unselectable headings in the mode list
@@ -131,6 +135,7 @@ class EditorApp:
         self.current_document = None  # documents.LoadedDocument the editor text came from
         self.modified = False
         self.session_usage = empty_usage()  # token counts of every request since the app started
+        self._connection = ("", COLOR_NEUTRAL)  # last message and state of the connection label
 
         self.root.title(APP_TITLE)
         self.root.geometry("1120x780")
@@ -153,28 +158,75 @@ class EditorApp:
         return build_service(self.settings, BACKEND_REMOTE)
 
     def _configure_style(self):
-        apply_theme(self.root)
+        apply_theme(self.root, high_contrast=self.settings.high_contrast, scale=self.settings.ui_scale)
+        subscribe(self._restyle)
+
+    def _restyle(self):
+        """Re-apply palette colours to the plain Tk widgets after a theme change."""
+        if not hasattr(self, "text_area"):
+            return
+        style_text(self.text_area, size=11)
+        self.text_area.configure(state=tk.DISABLED if self.generating else tk.NORMAL)
+        self.connection_label.configure(background=PALETTE["header"])
+        self._set_connection(*self._connection)
 
     def _build_menu(self):
         menubar = tk.Menu(self.root)
         self.file_menu = tk.Menu(menubar, tearoff=False)
-        self.file_menu.add_command(label="Open...", accelerator="Ctrl+O", command=self.open_file)
-        self.file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.save_file)
-        self.file_menu.add_command(label="Save As...", accelerator="Ctrl+Shift+S", command=self.save_file_as)
+        self.file_menu.add_command(label="Open...", underline=0, accelerator="Ctrl+O", command=self.open_file)
+        self.file_menu.add_command(label="Save", underline=0, accelerator="Ctrl+S", command=self.save_file)
+        self.file_menu.add_command(label="Save As...", underline=5, accelerator="Ctrl+Shift+S", command=self.save_file_as)
         self.recent_menu = tk.Menu(self.file_menu, tearoff=False)
-        self.file_menu.add_cascade(label="Recent", menu=self.recent_menu)
+        self.file_menu.add_cascade(label="Recent", underline=0, menu=self.recent_menu)
         self.file_menu.add_separator()
-        self.file_menu.add_command(label="Send to automatic review", command=self.send_to_review)
+        self.file_menu.add_command(label="Send to automatic review", underline=8, command=self.send_to_review)
         self.file_menu.add_separator()
-        self.file_menu.add_command(label="Quit", command=self.close)
-        menubar.add_cascade(label="File", menu=self.file_menu)
+        self.file_menu.add_command(label="Quit", underline=0, command=self.close)
+        menubar.add_cascade(label="File", underline=0, menu=self.file_menu)
+        view_menu = tk.Menu(menubar, tearoff=False)
+        view_menu.add_command(label="Larger text", underline=0, accelerator="Ctrl++", command=lambda: self.zoom(1))
+        view_menu.add_command(label="Smaller text", underline=0, accelerator="Ctrl+-", command=lambda: self.zoom(-1))
+        view_menu.add_command(label="Normal text size", underline=0, accelerator="Ctrl+0", command=lambda: self.zoom(0))
+        view_menu.add_separator()
+        self.high_contrast_var = tk.BooleanVar(value=bool(self.settings.high_contrast))
+        view_menu.add_checkbutton(label="High contrast", underline=0, variable=self.high_contrast_var,
+                                  command=self.toggle_high_contrast)
+        menubar.add_cascade(label="View", underline=0, menu=view_menu)
         help_menu = tk.Menu(menubar, tearoff=False)
-        help_menu.add_command(label="Releases on GitHub", command=self.open_releases)
+        help_menu.add_command(label="Releases on GitHub", underline=0, command=self.open_releases)
         help_menu.add_separator()
-        help_menu.add_command(label="About TextEnhanceAI", command=self.show_about)
-        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="About TextEnhanceAI", underline=0, command=self.show_about)
+        menubar.add_cascade(label="Help", underline=0, menu=help_menu)
         self.root.config(menu=menubar)
         self._rebuild_recent_menu()
+
+    # ------------------------------------------------------------ view menu
+    def zoom(self, direction):
+        """Scale every font up (1), down (-1) or back to 100 % (0); persisted as ``ui_scale``."""
+        if direction == 0:
+            scale = 1.0
+        else:
+            scale = clamp_ui_scale(self.settings.ui_scale + direction * UI_SCALE_STEP)
+        if scale == self.settings.ui_scale and direction != 0:
+            self.set_status("Text size is already at {0:.0f} %.".format(scale * 100))
+            return "break"
+        self.settings.ui_scale = scale
+        apply_theme(self.root, scale=scale)
+        self._save_settings()
+        self.set_status("Text size {0:.0f} %.".format(scale * 100))
+        return "break"
+
+    def toggle_high_contrast(self, enabled=None):
+        """Switch between the normal and the high-contrast palette (View menu)."""
+        if enabled is None:
+            enabled = bool(self.high_contrast_var.get())
+        else:
+            self.high_contrast_var.set(bool(enabled))
+        self.settings.high_contrast = bool(enabled)
+        apply_theme(self.root, high_contrast=self.settings.high_contrast)
+        self._save_settings()
+        self.set_status("High contrast on." if enabled else "High contrast off.")
+        return "break"
 
     # ------------------------------------------------------------------ help
     @staticmethod
@@ -246,7 +298,7 @@ class EditorApp:
             )
             button.pack(side=tk.LEFT, padx=(0, 4))
             self.mode_buttons[mode] = button
-        self.connection_var = tk.StringVar(value="Checking...")
+        self.connection_var = tk.StringVar(value="\u25cb Checking...")
         self.connection_label = tk.Label(
             header,
             textvariable=self.connection_var,
@@ -407,6 +459,12 @@ class EditorApp:
         self.root.bind_all("<Alt-Right>", self._next_shortcut)
         self.root.bind_all("<Alt-Up>", self._up_shortcut)
         self.root.bind_all("<Alt-Down>", self._down_shortcut)
+        for sequence in ("<Control-equal>", "<Control-plus>", "<Control-KP_Add>"):
+            self.root.bind_all(sequence, lambda event: self.zoom(1))
+        for sequence in ("<Control-minus>", "<Control-underscore>", "<Control-KP_Subtract>"):
+            self.root.bind_all(sequence, lambda event: self.zoom(-1))
+        for sequence in ("<Control-Key-0>", "<Control-KP_0>"):
+            self.root.bind_all(sequence, lambda event: self.zoom(0))
 
     def _in_review(self):
         return bool(self.current_session)
@@ -685,12 +743,16 @@ class EditorApp:
         )
 
     def _set_connection(self, message, color):
-        self.connection_var.set(message)
+        """Show the connection state in the header: a glyph and the message, coloured by state."""
+        self._connection = (message, color)
+        self.connection_var.set("{0} {1}".format(CONNECTION_GLYPHS.get(color, ""), message).strip())
         header_colors = {
             COLOR_OK: "#7ee2a8",
             COLOR_WARN: "#ffd27a",
             COLOR_ERROR: "#ff9b8f",
         }
+        if PALETTE["header"] == "#000000":  # high contrast: brighter tints on black
+            header_colors = {COLOR_OK: "#9dffc4", COLOR_WARN: "#ffe08a", COLOR_ERROR: "#ffb3a7"}
         self.connection_label.configure(foreground=header_colors.get(color, PALETTE["header_muted"]))
 
     # ------------------------------------------------------- backend switching

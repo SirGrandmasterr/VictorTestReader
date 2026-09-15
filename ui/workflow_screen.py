@@ -64,7 +64,20 @@ from core.workflow import (
     render_segment,
     resync_project,
 )
-from .theme import CHECK_COLORS, PALETTE, STATUS_COLORS, ScrollableFrame, Tooltip, font, style_text
+from .theme import (
+    CHECK_COLORS,
+    DECISION_GLYPHS,
+    PALETTE,
+    SPAN_MARKERS,
+    STATUS_COLORS,
+    STATUS_GLYPHS,
+    ScrollableFrame,
+    Tooltip,
+    bind_restyle,
+    font,
+    scaled,
+    style_text,
+)
 
 STATUS_LABELS = {
     STATUS_QUEUED: "Queued",
@@ -73,14 +86,6 @@ STATUS_LABELS = {
     STATUS_CLEAN: "No changes",
     STATUS_READY: "To review",
     STATUS_REVIEWED: "Reviewed",
-}
-STATUS_SYMBOLS = {
-    STATUS_QUEUED: "○",
-    "running": "◐",
-    STATUS_ERROR: "!",
-    STATUS_CLEAN: "✓",
-    STATUS_READY: "●",
-    STATUS_REVIEWED: "✓",
 }
 STATE_LABELS = {
     STATE_APPLIED: "Applied",
@@ -144,6 +149,11 @@ class StyleGuideBox(tk.Text):
         self.bind("<FocusIn>", self._focus_in)
         self.bind("<FocusOut>", self._focus_out)
         self.set("")
+        bind_restyle(self, self.restyle)
+
+    def restyle(self):
+        style_text(self, size=10)
+        self.configure(foreground=PALETTE["muted"] if self._showing_placeholder else PALETTE["text"])
 
     def get_text(self):
         """Return the author's text ("" while the placeholder is shown)."""
@@ -424,6 +434,60 @@ class StatisticsDialog(tk.Toplevel):
 def _one_line(text, limit=60):
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def state_text(state):
+    """A decision state as glyph plus word, e.g. "✓ Applied" (never colour alone)."""
+    return "{0} {1}".format(DECISION_GLYPHS.get(state, ""), STATE_LABELS.get(state, state)).strip()
+
+
+def status_text(status, detail=""):
+    """A segment status as glyph plus word with an optional detail, e.g. "● To review · 2 pending"."""
+    label = STATUS_LABELS.get(status, status)
+    if detail:
+        label = "{0} · {1}".format(label, detail)
+    return "{0} {1}".format(STATUS_GLYPHS.get(status, ""), label).strip()
+
+
+def mark_spans(text, spans, markers=SPAN_MARKERS):
+    """Insert a text marker in front of every span; returns ``(text, spans)`` in the new coordinates.
+
+    ``spans`` are ``render_chapter_annotated`` dicts; the returned copies carry
+    shifted ``start``/``end`` so tags and clicks keep lining up. Spans starting
+    at the same offset share one marker each (both are inserted, in order).
+    """
+    inserts = sorted(
+        ((span["start"], number, markers[span["state"]]) for number, span in enumerate(spans)
+         if span["state"] in markers),
+        key=lambda item: (item[0], item[1]),
+    )
+    if not inserts:
+        return text, [dict(span) for span in spans]
+    pieces = []
+    position = 0
+    for offset, _, marker in inserts:
+        pieces.append(text[position:offset])
+        pieces.append(marker)
+        position = offset
+    pieces.append(text[position:])
+    marked = "".join(pieces)
+
+    def shift(offset, inclusive):
+        added = 0
+        for insert_at, _, marker in inserts:
+            if insert_at < offset or (inclusive and insert_at == offset):
+                added += len(marker)
+            else:
+                break
+        return offset + added
+
+    shifted = []
+    for number, span in enumerate(spans):
+        copy = dict(span)
+        copy["start"] = shift(span["start"], inclusive=True)
+        copy["end"] = max(copy["start"], shift(span["end"], inclusive=False))
+        shifted.append(copy)
+    return marked, shifted
 
 
 class WorkflowScreen(ttk.Frame):
@@ -1383,7 +1447,7 @@ class ChangeCard(ttk.Frame):
 
     def __init__(self, parent, change, segment_text, state, on_select, on_decide, on_add_to_glossary=None,
                  on_edit=None):
-        super().__init__(parent, style="Card.TFrame", padding=(10, 8))
+        super().__init__(parent, style="Card.TFrame", padding=(10, 8), takefocus=1)
         self.change = change
         self.on_select = on_select
         self.on_decide = on_decide
@@ -1391,17 +1455,16 @@ class ChangeCard(ttk.Frame):
         self.on_edit = on_edit
         self.editor = None
         self.selected = False
-        fg, bg = CHECK_COLORS[change.check]
 
         top = ttk.Frame(self, style="Surface.TFrame")
         top.pack(fill=tk.X)
         self.badge = ttk.Label(top, text=CHECK_LABELS[change.check], style="{0}.Badge.TLabel".format(change.check.title()))
         self.badge.pack(side=tk.LEFT)
-        self.state_label = ttk.Label(top, text=STATE_LABELS[state], style="{0}.State.TLabel".format(state.title()))
+        self.state_label = ttk.Label(top, text=state_text(state), style="{0}.State.TLabel".format(state.title()))
         self.state_label.pack(side=tk.LEFT, padx=8)
         self.kind_tag = ttk.Label(top, text=CHANGE_KIND_LABELS.get(change.kind, change.kind), style="Kind.Badge.TLabel")
         self.kind_tag.pack(side=tk.LEFT, padx=(0, 8))
-        self.edited_tag = ttk.Label(top, text="✎ edited", style="Kind.Badge.TLabel")
+        self.edited_tag = ttk.Label(top, text="{0} edited".format(DECISION_GLYPHS["edited"]), style="Kind.Badge.TLabel")
         if change.edited:
             self.edited_tag.pack(side=tk.LEFT, padx=(0, 8))
             Tooltip(self.edited_tag, "The model proposed: {0}".format(change.model_proposed_text or "∅"))
@@ -1413,11 +1476,10 @@ class ChangeCard(ttk.Frame):
             Tooltip(self.flag_badge, flag_tooltip(change))
         self.glossary_link = None
         if on_add_to_glossary is not None and change.original_text.strip() and not change.is_author:
-            # A small link: reject this change and protect the original wording from now on.
-            self.glossary_link = tk.Label(top, text="Add to glossary", cursor="hand2", font=font(9),
-                                          foreground=PALETTE["accent"], background=PALETTE["surface"])
+            # A link-styled button (reachable with Tab): reject this change and protect the original wording.
+            self.glossary_link = ttk.Button(top, text="Add to glossary", style="Link.TButton",
+                                            command=self._add_to_glossary)
             self.glossary_link.pack(side=tk.LEFT, padx=(4, 0))
-            self.glossary_link.bind("<Button-1>", self._add_to_glossary)
         self.reject_button = ttk.Button(top, text="Reject", style="Small.Danger.TButton",
                                         command=lambda: self.on_decide(self.change, REJECTED))
         self.reject_button.pack(side=tk.RIGHT)
@@ -1440,12 +1502,13 @@ class ChangeCard(ttk.Frame):
         self._render_diff(segment_text)
         self.diff.pack(fill=tk.X, pady=(6, 4))
 
-        self.explanation = ttk.Label(self, text=change.explanation or "", style="SurfaceMuted.TLabel",
-                                     wraplength=520, justify=tk.LEFT, font=font(9, slant="italic"))
+        self.explanation = ttk.Label(self, text=change.explanation or "", style="Explanation.TLabel",
+                                     wraplength=520, justify=tk.LEFT)
         self.explanation.pack(anchor="w")
 
         for widget in (self, top, self.badge, self.state_label, self.diff, self.explanation):
             widget.bind("<Button-1>", self._clicked, add="+")
+        self.bind("<FocusIn>", self._focused)  # Tab reaches the card; Alt+A / Alt+R then act on it
         self.refresh(state)
 
     def _render_diff(self, segment_text):
@@ -1474,7 +1537,15 @@ class ChangeCard(ttk.Frame):
 
     def _clicked(self, event=None):
         self.on_select(self.change)
+        try:
+            self.focus_set()
+        except tk.TclError:
+            pass
         return "break"
+
+    def _focused(self, event=None):
+        if not self.selected:
+            self.on_select(self.change)
 
     # ---- inline editing of the proposed text
     def begin_edit(self):
@@ -1517,13 +1588,11 @@ class ChangeCard(ttk.Frame):
     def refresh(self, state, selected=None):
         if selected is not None:
             self.selected = selected
-        self.state_label.configure(text=STATE_LABELS[state], style="{0}.State.TLabel".format(state.title()))
+        self.state_label.configure(text=state_text(state), style="{0}.State.TLabel".format(state.title()))
         self.configure(style="Selected.Card.TFrame" if self.selected else "Card.TFrame")
         surface = PALETTE["selection"] if self.selected else PALETTE["surface"]
         self.diff.configure(background=surface)
-        if self.glossary_link is not None:
-            self.glossary_link.configure(background=surface)
-        self.explanation.configure(style="SelectedMuted.TLabel" if self.selected else "SurfaceMuted.TLabel")
+        self.explanation.configure(style="SelectedExplanation.TLabel" if self.selected else "Explanation.TLabel")
         for child in self.winfo_children():
             if isinstance(child, ttk.Frame):
                 child.configure(style="Selected.TFrame" if self.selected else "Surface.TFrame")
@@ -1560,7 +1629,57 @@ class ProjectView(ttk.Frame):
         self.listed = {}  # all-changes tab: row iid -> (chapter_index, segment_index, change_id)
         self.throughput = None  # relay chunk rate / queue depth shown in the progress line, see set_throughput
         self._last_progress = None  # (done, total, running, eta) of the last update_progress call
+        self.markers_var = tk.BooleanVar(value=False)  # chapter tab: [+]/[~]/[−] before every change span
         self._build()
+        bind_restyle(self, self.restyle)
+
+    def restyle(self):
+        """Re-apply palette colours to the text areas and tree tags after a theme change."""
+        style_text(self.text, size=11, readonly=True)
+        style_text(self.chapter_text, size=11, readonly=True)
+        self._configure_tags()
+        for status, color in STATUS_COLORS.items():
+            self.tree.tag_configure(status, foreground=color)
+        self.tree.column("#0", width=scaled(200))
+        self.tree.column("status", width=scaled(170))
+        self.after_idle(self._place_sash)
+        self.list_tree.tag_configure("flagged", foreground=PALETTE["warning"])
+        self.consistency_tree.tag_configure(STATUS_ISSUE, foreground=PALETTE["danger"])
+        self.consistency_tree.tag_configure(STATUS_OK, foreground=PALETTE["success"])
+        self.consistency_tree.tag_configure(STATUS_UNVERIFIED, foreground=PALETTE["warning"])
+        self.consistency_tree.tag_configure(STATUS_DISMISSED, foreground=PALETTE["faint"])
+        self.consistency_tree.tag_configure("occurrence", foreground=PALETTE["muted"])
+        if self.project is not None:
+            self.render_segment()
+            self.schedule_chapter_render()
+
+    def _place_sash(self):
+        """Give the tree enough room for both columns at the current scale."""
+        try:
+            self.paned.sashpos(0, scaled(340))
+        except tk.TclError:
+            pass
+
+    def _configure_tags(self):
+        for check, (fg, bg) in CHECK_COLORS.items():
+            self.text.tag_configure(check, background=bg, foreground=fg, underline=True)
+        self.text.tag_configure("selected", background=PALETTE["accent_soft"], foreground=PALETTE["accent_dark"],
+                                underline=True)
+        self.text.tag_configure("rejected", background=PALETTE["surface"], underline=False, overstrike=False,
+                                foreground=PALETTE["muted"])
+        self.text.tag_raise("selected")
+        self.text.tag_raise("sel")
+        widget = self.chapter_text
+        widget.tag_configure(STATE_APPLIED, foreground=PALETTE["success"], underline=True)
+        widget.tag_configure(STATE_PENDING, background=PALETTE["warning_soft"], foreground=PALETTE["text"])
+        widget.tag_configure(STATE_REJECTED, foreground=PALETTE["muted"], overstrike=True)
+        widget.tag_configure(STATE_SUPERSEDED, foreground=PALETTE["muted"], underline=True)
+        widget.tag_configure("flagged", foreground=PALETTE["warning"], underline=True)
+        widget.tag_configure("current", background=PALETTE["accent_soft"])
+        widget.tag_configure("marker", foreground=PALETTE["accent_dark"], font=font(11, "bold"))
+        widget.tag_raise("current")
+        widget.tag_raise("flagged")
+        widget.tag_raise("marker")
 
     # ---------------------------------------------------------------- build
     def _build(self):
@@ -1616,7 +1735,7 @@ class ProjectView(ttk.Frame):
         for check in CHECKS:
             ttk.Checkbutton(checks_row, text=CHECK_LABELS[check], variable=self.filter_vars[check],
                             command=self.render_segment).pack(side=tk.LEFT, padx=(8, 0))
-        self.kinds_button = ttk.Menubutton(checks_row, text="Kinds ▾", style="Small.TButton")
+        self.kinds_button = ttk.Menubutton(checks_row, text="Kinds ▾", style="Small.TMenubutton")
         self.kinds_menu = tk.Menu(self.kinds_button, tearoff=False, postcommand=self._fill_kinds_menu)
         self.kinds_button.configure(menu=self.kinds_menu)
         self.kinds_button.pack(side=tk.LEFT, padx=(12, 0))
@@ -1626,7 +1745,7 @@ class ProjectView(ttk.Frame):
                                            "Alt+↑/↓ change · Alt+←/→ segment")
         ttk.Label(checks_row, textvariable=self.hint_var, style="Muted.TLabel", font=font(9)).pack(side=tk.RIGHT)
 
-        paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        paned = self.paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         paned.grid(row=2, column=0, sticky="nsew")
 
         left = ttk.Frame(paned)
@@ -1635,7 +1754,7 @@ class ProjectView(ttk.Frame):
         self.tree.heading("#0", text="Chapters and segments", anchor="w")
         self.tree.heading("status", text="Status", anchor="w")
         self.tree.column("#0", width=200, stretch=True)
-        self.tree.column("status", width=125, stretch=False)
+        self.tree.column("status", width=170, stretch=False)
         tree_scroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=tree_scroll.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1683,13 +1802,7 @@ class ProjectView(ttk.Frame):
         self.text = tk.Text(right, height=9)
         style_text(self.text, size=11, readonly=True)
         self.text.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=(4, 6))
-        for check, (fg, bg) in CHECK_COLORS.items():
-            self.text.tag_configure(check, background=bg, underline=True)
-        self.text.tag_configure("selected", background=PALETTE["accent_soft"], foreground=PALETTE["accent_dark"], underline=True)
-        self.text.tag_configure("rejected", background=PALETTE["surface"], underline=False, overstrike=False,
-                                foreground=PALETTE["muted"])
-        self.text.tag_raise("selected")
-        self.text.tag_raise("sel")
+        self._configure_tags()  # both text areas exist now
         self.text_menu = tk.Menu(self.text, tearoff=False, postcommand=self._fill_text_menu)
         self.text.bind("<Button-3>", self._text_context)
         self.text.bind("<Button-2>", self._text_context)
@@ -1716,33 +1829,32 @@ class ProjectView(ttk.Frame):
         """Read-only rendering of the whole chapter with one tag per change state."""
         tab = ttk.Frame(self.notebook)
         tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(1, weight=1)
+        tab.rowconfigure(2, weight=1)
         header = ttk.Frame(tab)
         header.grid(row=0, column=0, sticky="ew", padx=(10, 0), pady=(4, 4))
         self.chapter_title_var = tk.StringVar(value="")
-        ttk.Label(header, textvariable=self.chapter_title_var, font=font(11, "bold")).pack(side=tk.LEFT)
-        legend = ttk.Frame(header)
-        legend.pack(side=tk.RIGHT)
-        for label, style in (("applied", "Applied.State.TLabel"), ("pending", "Pending.State.TLabel"),
-                             ("rejected", "Rejected.State.TLabel"), ("superseded", "Superseded.State.TLabel"),
-                             ("⚠ flagged", "Flag.Badge.TLabel")):
-            ttk.Label(legend, text=label, style=style).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(header, textvariable=self.chapter_title_var, style="Heading.TLabel").pack(side=tk.LEFT)
+        markers = ttk.Checkbutton(header, text="Show markers", variable=self.markers_var,
+                                  command=self.render_chapter_view)
+        markers.pack(side=tk.RIGHT)
+        Tooltip(markers, "Put [+] before applied, [~] before pending and [−] before rejected or superseded "
+                         "changes so the states can be told apart without colour.")
+        legend = ttk.Frame(tab)
+        legend.grid(row=1, column=0, sticky="w", padx=(10, 0), pady=(0, 4))
+        for state, style in ((STATE_APPLIED, "Applied.State.TLabel"), (STATE_PENDING, "Pending.State.TLabel"),
+                             (STATE_REJECTED, "Rejected.State.TLabel"), (STATE_SUPERSEDED, "Superseded.State.TLabel")):
+            ttk.Label(legend, text="{0} {1}".format(SPAN_MARKERS[state], STATE_LABELS[state].lower()),
+                      style=style).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(legend, text="{0} flagged".format(STATUS_GLYPHS["flagged"]), style="Flag.Badge.TLabel").pack(
+            side=tk.LEFT)
         Tooltip(legend, "Click a highlighted passage to open its change in the Segment tab; "
                         "Alt+A / Alt+R then decide on it.")
         self.chapter_text = tk.Text(tab, height=20)
         style_text(self.chapter_text, size=11, readonly=True)
-        self.chapter_text.grid(row=1, column=0, sticky="nsew", padx=(10, 0))
+        self.chapter_text.grid(row=2, column=0, sticky="nsew", padx=(10, 0))
         scroll = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=self.chapter_text.yview)
-        scroll.grid(row=1, column=1, sticky="ns")
+        scroll.grid(row=2, column=1, sticky="ns")
         self.chapter_text.configure(yscrollcommand=scroll.set)
-        self.chapter_text.tag_configure(STATE_APPLIED, foreground=PALETTE["success"], underline=True)
-        self.chapter_text.tag_configure(STATE_PENDING, background=PALETTE["warning_soft"])
-        self.chapter_text.tag_configure(STATE_REJECTED, foreground=PALETTE["muted"], overstrike=True)
-        self.chapter_text.tag_configure(STATE_SUPERSEDED, foreground=PALETTE["muted"], underline=True)
-        self.chapter_text.tag_configure("flagged", foreground=PALETTE["warning"], underline=True)
-        self.chapter_text.tag_configure("current", background=PALETTE["accent_soft"])
-        self.chapter_text.tag_raise("current")
-        self.chapter_text.tag_raise("flagged")
         self.chapter_text.bind("<Button-1>", self._chapter_clicked)
         self.chapter_text.configure(cursor="hand2")
         return tab
@@ -2002,8 +2114,6 @@ class ProjectView(ttk.Frame):
         if chapter is None:
             return
         text, spans = render_chapter_annotated(self.project, chapter)
-        self.chapter_spans = spans
-        self.chapter_shown = chapter.index
         counts = {}
         for span in spans:
             counts[span["state"]] = counts.get(span["state"], 0) + 1
@@ -2012,6 +2122,11 @@ class ProjectView(ttk.Frame):
             ", ".join("{0} {1}".format(counts[state], STATE_LABELS[state].lower())
                       for state in (STATE_PENDING, STATE_APPLIED, STATE_REJECTED, STATE_SUPERSEDED) if counts.get(state))
             or "no changes"))
+        marked = bool(self.markers_var.get())
+        if marked:
+            text, spans = mark_spans(text, spans)
+        self.chapter_spans = spans  # in the coordinates of the shown text (markers included)
+        self.chapter_shown = chapter.index
         widget = self.chapter_text
         top = widget.yview()[0]
         widget.configure(state=tk.NORMAL)
@@ -2025,6 +2140,9 @@ class ProjectView(ttk.Frame):
                 widget.tag_add("flagged", start, end)
             if segment is not None and span["segment"] == segment.index and span["change_id"] == self.selected_change_id:
                 widget.tag_add("current", start, end)
+            if marked and span["state"] in SPAN_MARKERS:
+                marker = SPAN_MARKERS[span["state"]]
+                widget.tag_add("marker", "1.0+{0}c".format(span["start"] - len(marker)), start)
         widget.configure(state=tk.DISABLED)
         widget.yview_moveto(top)
 
@@ -2253,15 +2371,15 @@ class ProjectView(ttk.Frame):
         iid = self._segment_iid(chapter.index, segment.index)
         changes = segment.changes(self.project.enabled)
         pending = sum(1 for change in changes if change.decision == PENDING)
-        label = STATUS_LABELS[status]
+        detail = ""
         if status == STATUS_READY:
-            label = "{0} pending".format(pending)
+            detail = "{0} pending".format(pending)
         elif status == STATUS_REVIEWED:
-            label = "Reviewed ({0})".format(len(changes))
-        glyph = STATUS_SYMBOLS[status]
+            detail = "{0} changes".format(len(changes))
+        label = status_text(status, detail)
         if any(change.flagged and change.decision == PENDING for change in changes):
-            glyph = "\u26a0"  # pending changes the hallucination guard flagged
-        self.tree.item(iid, values=("{0} {1}".format(glyph, label),), tags=(status,))
+            label = STATUS_GLYPHS["flagged"] + " " + label  # pending changes the hallucination guard flagged
+        self.tree.item(iid, values=(label,), tags=(status,))
 
     def segment_updated(self, chapter_index, segment_index):
         chapter, segment = self.project.find(chapter_index, segment_index)
@@ -2454,9 +2572,8 @@ class ProjectView(ttk.Frame):
         self.segment_var.set("{0} · Segment {1} of {2} · {3} words".format(
             chapter.title, segment.index, len(chapter.segments), word_count(segment.text)))
         self.segment_status.configure(
-            text="{0}{1}{2}".format(
-                STATUS_LABELS[status],
-                " · {0} pending".format(pending) if pending else "",
+            text="{0}{1}".format(
+                status_text(status, "{0} pending".format(pending) if pending else ""),
                 " · {0} suppressed by glossary".format(suppressed) if suppressed else "",
             ),
             style="{0}.Status.TLabel".format(status.title()),
@@ -2554,7 +2671,7 @@ class ProjectView(ttk.Frame):
         pending = sum(1 for change in self._visible_changes(segment) if change.decision == PENDING)
         status = self._segment_status(chapter, segment)
         self.segment_status.configure(
-            text="{0}{1}".format(STATUS_LABELS[status], " · {0} pending".format(pending) if pending else ""),
+            text=status_text(status, "{0} pending".format(pending) if pending else ""),
             style="{0}.Status.TLabel".format(status.title()),
         )
 

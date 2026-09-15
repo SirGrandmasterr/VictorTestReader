@@ -22,6 +22,7 @@
 - Functions/variables: `snake_case`; classes: `PascalCase`; constants: `UPPER_CASE`.
 - Docstrings: short summary + key args/returns where useful.
 - UI labeling: keep button text concise; tooltips explain behavior.
+- UI theming (`ui/theme.py`): take colours from the `PALETTE` / `CHECK_COLORS` / `STATUS_COLORS` dicts at use time (never copy them into module constants; both the normal and the high-contrast palette fill the same keys) and fonts from `font(size, weight, slant)` / `named_font(role)`, which return Tk named fonts that `apply_scale` resizes together (`ui_scale` setting, Ctrl+= / Ctrl+- / Ctrl+0, View menu). A widget that configures plain Tk colours itself (tk.Text tags, tree tags) registers a restyle callback with `bind_restyle(widget, callback)` so a palette switch reaches it. State is shown as glyph plus word (`STATUS_GLYPHS`, `DECISION_GLYPHS`), never colour alone.
 - Prompts: extend the `PROMPTS` dict; avoid duplicating strings across the UI.
 - UI strings: wrap user-visible text in `tr()` from `ui/i18n.py` with named placeholders (`tr("Connecting to {url} ...", url=url)`), never positional `{0}`. `ui/connection_dialog.py` is the worked example; the other screens are still unwrapped. `python scripts/extract_strings.py de` lists strings missing from `locales/de.json` (`--update` adds empty keys). The language comes from `AppSettings.ui_language` (`auto|en|de`, env `TEAI_LANG`) and is applied once at start-up, so changes need a restart.
 

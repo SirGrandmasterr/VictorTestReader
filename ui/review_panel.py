@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from core.models import ACCEPTED, PENDING, REJECTED
+from .theme import DECISION_GLYPHS, PALETTE, bind_restyle, font, style_text
 
 
 DECISION_LABELS = {
@@ -12,13 +13,20 @@ DECISION_LABELS = {
     PENDING: "Pending",
     "mixed": "Partially accepted",
 }
-
-DECISION_COLORS = {
-    ACCEPTED: "#17823b",
-    REJECTED: "#c62828",
-    PENDING: "#1565c0",
-    "mixed": "#d97706",
+# The quick review's decisions map onto the review glyphs (never colour alone).
+QUICK_DECISION_GLYPHS = {
+    ACCEPTED: DECISION_GLYPHS["applied"],
+    REJECTED: DECISION_GLYPHS["rejected"],
+    PENDING: DECISION_GLYPHS["pending"],
+    "mixed": DECISION_GLYPHS["edited"],
 }
+# ttk style prefix per decision (styles are configured by theme.apply_theme)
+DECISION_STYLES = {ACCEPTED: "Applied", REJECTED: "Rejected", PENDING: "Pending", "mixed": "Mixed"}
+HUNK_KIND_LABELS = {"delete": "removed", "insert": "added", "replace": "replaced"}
+
+
+def decision_text(decision):
+    return "{0} {1}".format(QUICK_DECISION_GLYPHS.get(decision, ""), DECISION_LABELS.get(decision, decision.title())).strip()
 
 
 class ReviewPanel(ttk.Frame):
@@ -34,21 +42,12 @@ class ReviewPanel(ttk.Frame):
         self._build_widgets()
 
     def _build_widgets(self):
-        style = ttk.Style(self)
-        for decision, color in DECISION_COLORS.items():
-            style.configure(
-                "{0}.ReviewDecision.TLabel".format(decision.title()),
-                foreground=color,
-                font=("Segoe UI", 10, "bold"),
-            )
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
         header = ttk.Frame(self)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         self.counter_var = tk.StringVar(value="No suggestions")
-        ttk.Label(
-            header, textvariable=self.counter_var, font=("Segoe UI", 11, "bold")
-        ).pack(side=tk.LEFT)
+        ttk.Label(header, textvariable=self.counter_var, style="Heading.TLabel").pack(side=tk.LEFT)
         self.decision_var = tk.StringVar(value="")
         self.decision_label = ttk.Label(
             header,
@@ -57,7 +56,7 @@ class ReviewPanel(ttk.Frame):
         )
         self.decision_label.pack(side=tk.LEFT, padx=12)
         self.scope_var = tk.StringVar(value="")
-        self.scope_label = ttk.Label(header, textvariable=self.scope_var, foreground="#6b7280")
+        self.scope_label = ttk.Label(header, textvariable=self.scope_var, style="Muted.TLabel")
         self.scope_label.pack(side=tk.LEFT, padx=(0, 12))
 
         self.context_var = tk.BooleanVar(value=False)
@@ -69,16 +68,8 @@ class ReviewPanel(ttk.Frame):
         ).pack(side=tk.RIGHT)
 
         self.context_frame = ttk.LabelFrame(self, text="Original context")
-        self.context_text = tk.Text(
-            self.context_frame,
-            height=3,
-            wrap=tk.WORD,
-            relief=tk.FLAT,
-            background="#f3f4f6",
-            font=("Segoe UI", 9),
-        )
+        self.context_text = tk.Text(self.context_frame, height=3)
         self.context_text.pack(fill=tk.X, padx=5, pady=4)
-        self.context_text.configure(state=tk.DISABLED)
 
         self.comparison = ttk.Panedwindow(self, orient=tk.VERTICAL)
         self.comparison.grid(row=2, column=0, sticky="nsew")
@@ -92,55 +83,23 @@ class ReviewPanel(ttk.Frame):
         self.comparison.add(original_frame, weight=1)
         self.comparison.add(proposed_frame, weight=1)
 
-        self.original_text = tk.Text(
-            original_frame,
-            height=6,
-            wrap=tk.WORD,
-            font=("Segoe UI", 11),
-            padx=6,
-            pady=6,
-        )
+        self.original_text = tk.Text(original_frame, height=6)
         self.original_text.pack(fill=tk.BOTH, expand=True)
-        self.proposed_text = tk.Text(
-            proposed_frame,
-            height=6,
-            wrap=tk.WORD,
-            font=("Segoe UI", 11),
-            padx=6,
-            pady=6,
-        )
+        self.proposed_text = tk.Text(proposed_frame, height=6)
         self.proposed_text.pack(fill=tk.BOTH, expand=True)
         self.explanation_var = tk.StringVar(value="")
         self.explanation_label = ttk.Label(
-            proposed_frame, textvariable=self.explanation_var, foreground="#6b7280",
-            font=("Segoe UI", 9), wraplength=900, justify=tk.LEFT,
+            proposed_frame, textvariable=self.explanation_var, style="SmallMuted.TLabel",
+            wraplength=900, justify=tk.LEFT,
         )
-
-        self.original_text.tag_configure(
-            "removed", foreground="#8b1a1a", background="#ffe5e5", overstrike=True
-        )
-        self.proposed_text.tag_configure(
-            "added", foreground="#145a32", background="#e2f5e9", underline=True
-        )
-        self.original_text.configure(state=tk.DISABLED)
-        self.proposed_text.configure(state=tk.DISABLED)
-
         decision_row = ttk.Frame(self)
         decision_row.grid(row=3, column=0, sticky="ew", pady=6)
-        self.accept_item_button = tk.Button(
-            decision_row,
-            text="Accept sentence",
-            command=self.accept_current,
-            foreground=DECISION_COLORS[ACCEPTED],
-            activeforeground=DECISION_COLORS[ACCEPTED],
+        self.accept_item_button = ttk.Button(
+            decision_row, text="Accept sentence", command=self.accept_current, style="Success.TButton",
         )
         self.accept_item_button.pack(side=tk.LEFT)
-        self.reject_item_button = tk.Button(
-            decision_row,
-            text="Reject sentence",
-            command=self.reject_current,
-            foreground=DECISION_COLORS[REJECTED],
-            activeforeground=DECISION_COLORS[REJECTED],
+        self.reject_item_button = ttk.Button(
+            decision_row, text="Reject sentence", command=self.reject_current, style="Danger.TButton",
         )
         self.reject_item_button.pack(side=tk.LEFT, padx=5)
 
@@ -155,16 +114,17 @@ class ReviewPanel(ttk.Frame):
         self.details_frame = ttk.LabelFrame(self, text="Individual change groups")
         self.hunk_tree = ttk.Treeview(
             self.details_frame,
-            columns=("change", "decision"),
+            columns=("kind", "change", "decision"),
             show="headings",
             height=4,
             selectmode="browse",
         )
-        self.hunk_tree.heading("change", text="Original → Suggestion")
-        self.hunk_tree.heading("decision", text="Decision")
-        self.hunk_tree.column("change", width=520, stretch=True)
-        self.hunk_tree.column("decision", width=110, stretch=False)
-        self.hunk_tree.tag_configure("explanation", foreground="#6b7280", font=("Segoe UI", 9))
+        self.hunk_tree.heading("kind", text="Edit", anchor="w")
+        self.hunk_tree.heading("change", text="Original → Suggestion", anchor="w")
+        self.hunk_tree.heading("decision", text="Decision", anchor="w")
+        self.hunk_tree.column("kind", width=90, stretch=False)
+        self.hunk_tree.column("change", width=460, stretch=True)
+        self.hunk_tree.column("decision", width=130, stretch=False)
         self.hunk_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=4)
         hunk_actions = ttk.Frame(self.details_frame)
         hunk_actions.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -197,6 +157,22 @@ class ReviewPanel(ttk.Frame):
         ttk.Button(self.navigation, text="Back to editor", command=self._back).pack(
             side=tk.RIGHT, padx=5
         )
+        self._style_texts()
+        bind_restyle(self, self._style_texts)
+
+    def _style_texts(self):
+        """Palette colours and scalable fonts for the text areas (called again after a theme change)."""
+        for widget, size in ((self.context_text, 9), (self.original_text, 11), (self.proposed_text, 11)):
+            style_text(widget, size=size, readonly=True)
+            widget.configure(padx=6, pady=6)
+        self.context_text.configure(background=PALETTE["surface_alt"], highlightthickness=0)
+        self.original_text.tag_configure(
+            "removed", foreground=PALETTE["danger"], background=PALETTE["danger_soft"], overstrike=True
+        )
+        self.proposed_text.tag_configure(
+            "added", foreground=PALETTE["success"], background=PALETTE["success_soft"], underline=True
+        )
+        self.hunk_tree.tag_configure("explanation", foreground=PALETTE["muted"], font=font(9))
 
     def set_session(self, session):
         """Display a new editing session."""
@@ -267,13 +243,14 @@ class ReviewPanel(ttk.Frame):
                 "",
                 tk.END,
                 iid=iid,
-                values=(self._display_change(hunk), DECISION_LABELS[hunk.decision]),
+                values=(HUNK_KIND_LABELS.get(hunk.kind, hunk.kind), self._display_change(hunk),
+                        decision_text(hunk.decision)),
                 open=True,
             )
             if hunk.explanation:
                 # a grey line under the hunk; selecting it counts as selecting the hunk
                 self.hunk_tree.insert(
-                    iid, tk.END, iid="e{0}".format(index), values=("      \u21b3 " + hunk.explanation, ""),
+                    iid, tk.END, iid="e{0}".format(index), values=("", "      \u21b3 " + hunk.explanation, ""),
                     tags=("explanation",),
                 )
 
@@ -302,9 +279,9 @@ class ReviewPanel(ttk.Frame):
             "Suggestion {0} of {1}".format(self.current_index + 1, total)
         )
         decision = item.decision
-        self.decision_var.set(DECISION_LABELS.get(decision, decision.title()))
+        self.decision_var.set(decision_text(decision))
         self.decision_label.configure(
-            style="{0}.ReviewDecision.TLabel".format(decision.title())
+            style="{0}.ReviewDecision.TLabel".format(DECISION_STYLES.get(decision, "Pending"))
         )
         self._render_comparison(item)
         self._render_explanations(item)
