@@ -34,15 +34,15 @@ from .chunking import (
     chapters_from_outline,
     paragraph_outline,
     paragraphs,
-    read_text_file,
     split_document,
     split_segments,
     word_count,
 )
 from .diff_engine import build_edit_session
+from .documents import KIND_TXT, DocumentError, LoadedDocument, load_document, save_document, text_document
 from .models import ACCEPTED, PENDING, REJECTED, ReviewItem
 
-PROJECT_FORMAT = 1
+PROJECT_FORMAT = 2  # 2: "document" (source kind and paragraph locators for .docx/.odt export)
 PROJECT_DIR_SUFFIX = ".teai"
 PROJECT_FILE = "project.json"
 DECISION_LOG_LIMIT = 5000  # oldest decisions are dropped beyond this
@@ -549,10 +549,24 @@ class Project:
     source_sha256: str = ""  # fingerprint of the manuscript text the project was split from
     source_mtime: float = 0.0
     consistency: list = field(default_factory=list)  # consistency.Finding objects, see core/consistency.py
+    # source format and paragraph locators (documents.LoadedDocument.to_dict without the text)
+    document: dict = field(default_factory=lambda: {"kind": KIND_TXT, "paragraphs": [], "meta": {}})
     root: Optional[Path] = field(default=None, repr=False, compare=False)
     source_check_reason: str = field(default="", repr=False, compare=False)  # set by source_changed()
 
     # ------------------------------------------------------------ queries
+    @property
+    def document_kind(self):
+        return self.document.get("kind") or KIND_TXT
+
+    def original_text(self):
+        """The manuscript text this project was split from (chapters concatenate back to it)."""
+        return "".join(chapter.heading + chapter.body + chapter.trailing for chapter in self.chapters)
+
+    def loaded_document(self):
+        """Rebuild the LoadedDocument (text plus paragraph locators) the project was created from."""
+        return LoadedDocument.from_dict(self.document, self.original_text(), self.source_path)
+
     def all_segments(self):
         """Yield (chapter, segment) pairs in document order."""
         for chapter in self.chapters:
@@ -730,8 +744,8 @@ class Project:
             self.source_check_reason = "unchanged"
             return False
         try:
-            digest = text_fingerprint(read_text_file(path))
-        except (OSError, UnicodeError):
+            digest = text_fingerprint(load_document(path).text)
+        except (OSError, UnicodeError, DocumentError):
             self.source_check_reason = "missing"
             return False
         changed = digest != self.source_sha256
@@ -900,6 +914,7 @@ class Project:
             "source_sha256": self.source_sha256,
             "source_mtime": self.source_mtime,
             "consistency": [finding.to_dict() for finding in self.consistency],
+            "document": LoadedDocument.from_dict(self.document).to_dict(),
         }
 
     @classmethod
@@ -923,6 +938,7 @@ class Project:
             source_sha256=str(data.get("source_sha256") or ""),
             source_mtime=float(data.get("source_mtime") or 0.0),
             consistency=findings,
+            document=LoadedDocument.from_dict(data.get("document")).to_dict(),  # format 1 files: plain text
             root=root,
         )
 
@@ -965,8 +981,14 @@ class Project:
     def render_document(self):
         return "".join(self.render_chapter(chapter) for chapter in self.chapters)
 
-    def export(self):
-        """Write reviewed chapters, the combined document and a Markdown report."""
+    def export(self, on_warning=None):
+        """Write reviewed chapters, the combined document and a Markdown report.
+
+        A manuscript loaded from ``.md``/``.docx``/``.odt`` is also written
+        back in that format as ``<name>-reviewed.<ext>`` (``"formatted"`` in the
+        returned dict; see ``documents.save_document`` for what survives).
+        Limitations hit on the way go to ``on_warning`` and ``"warnings"``.
+        """
         reviewed = self.root / "reviewed"
         reviewed.mkdir(parents=True, exist_ok=True)
         written = []
@@ -974,11 +996,26 @@ class Project:
             path = reviewed / chapter.file_name
             path.write_text(self.render_chapter(chapter), encoding="utf-8")
             written.append(path)
+        document_text = self.render_document()
         combined = self.root / "{0}-reviewed.txt".format(self.name)
-        combined.write_text(self.render_document(), encoding="utf-8")
+        combined.write_text(document_text, encoding="utf-8")
         report = self.root / "report.md"
         report.write_text(self.build_report(), encoding="utf-8")
-        return {"chapters": written, "document": combined, "report": report}
+        result = {"chapters": written, "document": combined, "report": report, "warnings": []}
+
+        def warn(message):
+            result["warnings"].append(message)
+            if on_warning:
+                on_warning(message)
+
+        loaded = self.loaded_document()
+        if loaded.kind != KIND_TXT:
+            formatted = self.root / "{0}-reviewed{1}".format(self.name, loaded.suffix)
+            try:
+                result["formatted"] = save_document(loaded, document_text, formatted, warn)
+            except DocumentError as exc:
+                warn("The {0} file could not be written: {1}".format(loaded.suffix, exc))
+        return result
 
     def build_report(self):
         from .statistics import project_statistics, statistics_markdown  # statistics imports this module
@@ -1204,9 +1241,23 @@ def pending_changes(project):
 
 
 # ------------------------------------------------------------- creation
+def _as_document(source_path, text):
+    """Accept either a ``LoadedDocument`` or plain text for the manuscript."""
+    if isinstance(text, LoadedDocument):
+        return text
+    return text_document(text, str(source_path))
+
+
 def create_project(source_path, text, options, model="", backend="", root=None):
-    """Split a manuscript and return an unevaluated project."""
+    """Split a manuscript and return an unevaluated project.
+
+    ``text`` is the manuscript text or the ``documents.LoadedDocument`` it was
+    read from; the latter lets ``export`` write the reviewed text back in the
+    source format.
+    """
     source_path = Path(source_path)
+    document = _as_document(source_path, text)
+    text = document.text
     result = split_document(
         text, mode="auto" if options.chapter_mode == "model" else options.chapter_mode,
         target_chars=options.target_chars, max_chars=options.max_chars,
@@ -1222,6 +1273,7 @@ def create_project(source_path, text, options, model="", backend="", root=None):
     project = Project(
         source_path.stem, str(source_path), datetime.now().isoformat(timespec="seconds"),
         options, chapters, model, backend, result.method,
+        document=document.to_dict(),
         root=Path(root) if root else source_path.with_name(source_path.stem + PROJECT_DIR_SUFFIX),
     )
     project.remember_source(text)
@@ -1272,7 +1324,11 @@ def resync_project(project, new_text):
     entries are re-pointed at the kept segments' new positions, those of
     dropped segments are marked stale, and a stale "resync" marker entry
     records the summary. Returns ``{"kept", "new", "removed", "chapters", "report"}``.
+    ``new_text`` may be a ``LoadedDocument``; its paragraph locators then
+    replace the project's.
     """
+    document = _as_document(project.source_path, new_text)
+    new_text = document.text
     result = _chapters_for_resync(project, new_text)
     pool = {}
     for chapter in project.chapters:
@@ -1312,6 +1368,7 @@ def resync_project(project, new_text):
             entry["stale"] = True
     project.chapters = chapters
     project.method = result.method
+    project.document = document.to_dict()
     project.remember_source(new_text)
     summary = {"kept": kept, "new": new, "removed": removed, "chapters": len(chapters), "report": report}
     project.decision_log.append({
@@ -1638,24 +1695,39 @@ def _change_lines(segment_text, changes, first_number):
     return lines
 
 
+def _check_clause(check):
+    """``(who, what)`` for the explanation prompt: a CHECKS member or a free-text instruction.
+
+    ``check`` may be one of ``CHECKS`` (the manuscript review) or any other
+    string, which is used verbatim as the instruction the edit followed (the
+    quick editor's modes). ``changes`` given to the builders below only need
+    ``start``/``end``/``original_text``/``proposed_text``.
+    """
+    if check in CHECK_LABELS:
+        return "A {0} check".format(CHECK_LABELS[check].lower()), "Check: {0}".format(CHECK_DESCRIPTIONS[check])
+    return "An editing pass", "Instruction: {0}".format(str(check).strip())
+
+
 def build_explanation_messages(segment_text, changes, check, language=SAME_LANGUAGE, style_guide=""):
     """Build the prompt asking for one short explanation per change of one segment.
 
     The author's rules are appended after the check description so the
-    explanations do not argue against them.
+    explanations do not argue against them. ``check`` is a CHECKS member or
+    a plain instruction string (see ``_check_clause``).
     """
+    who, what = _check_clause(check)
     return [
         {"role": "system", "content": EXPLANATION_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
-                "A {0} check proposed the changes listed below for the text. For each "
+                "{0} proposed the changes listed below for the text. For each "
                 "numbered change, write one short explanation (at most 15 words, {1}) of "
                 "why the new version is better. Return a JSON object mapping the change "
                 "number to its explanation, e.g. {{\"1\": \"...\", \"2\": \"...\"}}.\n\n"
-                "Check: {2}{3}\n\nText:\n{4}\n\nChanges:\n{5}"
+                "{2}{3}\n\nText:\n{4}\n\nChanges:\n{5}"
             ).format(
-                CHECK_LABELS[check].lower(), _language_clause(language), CHECK_DESCRIPTIONS[check],
+                who, _language_clause(language), what,
                 format_style_guide(style_guide), segment_text, "\n".join(_change_lines(segment_text, changes, 1)),
             ),
         },
@@ -1679,19 +1751,20 @@ def build_grouped_explanation_messages(entries, check, language=SAME_LANGUAGE, s
             position, segment_text, "\n".join(_change_lines(segment_text, changes, number))
         ))
         number += len(changes)
+    who, what = _check_clause(check)
     return [
         {"role": "system", "content": EXPLANATION_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
-                "A {0} check proposed the changes listed below for {1} segments of a manuscript. For "
+                "{0} proposed the changes listed below for {1} segments of a manuscript. For "
                 "each numbered change, write one short explanation (at most 15 words, {2}) of why the "
                 "new version is better. Return a JSON object mapping the change number to its "
                 "explanation, e.g. {{\"1\": \"...\", \"2\": \"...\"}}.\n\n"
-                "Check: {3}{4}\n\n{5}"
+                "{3}{4}\n\n{5}"
             ).format(
-                CHECK_LABELS[check].lower(), len(entries), _language_clause(language),
-                CHECK_DESCRIPTIONS[check], format_style_guide(style_guide), "\n\n".join(blocks),
+                who, len(entries), _language_clause(language),
+                what, format_style_guide(style_guide), "\n\n".join(blocks),
             ),
         },
     ]

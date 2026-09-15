@@ -48,3 +48,43 @@ def test_discarded_session_is_logged_without_losing_proposal(tmp_path):
     assert "## Suggestions" in content
     assert "Outcome: **discarded**" in content
     assert "Old text." in content
+
+
+def test_selection_only_sessions_record_the_span(tmp_path):
+    full = "Keep. Teh cat. Keep."
+    session = build_edit_session("Teh cat.", "The cat.", selection=(6, 14), full_text=full)
+    logger = ScratchpadLogger(tmp_path, now_provider=lambda: datetime(2026, 7, 12, 10, 11, 14))
+
+    content = logger.log_proposal(session).read_text(encoding="utf-8")
+
+    assert "- Selection: chars 6–14 of 20 characters" in content
+    assert "Keep." not in content.split("## Original text")[1].split("## Proposed text")[0]
+
+
+def test_chain_steps_are_logged_with_their_intermediate_output(tmp_path):
+    from core.models import ChainStep
+
+    session = build_edit_session("teh cat", "THE CAT", instruction="Chain: Fix -> Loud")
+    session.steps = [ChainStep("Fix", "fix", "the cat"), ChainStep("Loud", "upper", "THE CAT")]
+    logger = ScratchpadLogger(tmp_path, now_provider=lambda: datetime(2026, 7, 12, 10, 11, 15))
+
+    content = logger.log_proposal(session).read_text(encoding="utf-8")
+
+    assert "## Steps" in content
+    assert "### Step 1: Fix" in content and "- Instruction: fix" in content and "the cat" in content
+    assert "### Step 2: Loud" in content
+    assert content.index("## Steps") < content.index("## Proposed text")
+
+    single = build_edit_session("a", "b")
+    single.steps = [ChainStep("Grammar", "g", "b")]
+    assert "## Steps" not in logger.log_proposal(single).read_text(encoding="utf-8").split("---")[-1]
+
+
+def test_hunk_explanations_are_logged_under_the_suggestion(tmp_path):
+    session = build_edit_session("Teh cat.", "The cat.")
+    session.review_items[0].changed_hunks[0].explanation = "Typo fixed."
+    logger = ScratchpadLogger(tmp_path, now_provider=lambda: datetime(2026, 7, 12, 10, 11, 16))
+
+    content = logger.log_proposal(session).read_text(encoding="utf-8")
+
+    assert "- Change 1: `Teh` \u2192 `The` \u2014 Typo fixed." in content

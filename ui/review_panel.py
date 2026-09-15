@@ -56,6 +56,9 @@ class ReviewPanel(ttk.Frame):
             style="Pending.ReviewDecision.TLabel",
         )
         self.decision_label.pack(side=tk.LEFT, padx=12)
+        self.scope_var = tk.StringVar(value="")
+        self.scope_label = ttk.Label(header, textvariable=self.scope_var, foreground="#6b7280")
+        self.scope_label.pack(side=tk.LEFT, padx=(0, 12))
 
         self.context_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -107,6 +110,11 @@ class ReviewPanel(ttk.Frame):
             pady=6,
         )
         self.proposed_text.pack(fill=tk.BOTH, expand=True)
+        self.explanation_var = tk.StringVar(value="")
+        self.explanation_label = ttk.Label(
+            proposed_frame, textvariable=self.explanation_var, foreground="#6b7280",
+            font=("Segoe UI", 9), wraplength=900, justify=tk.LEFT,
+        )
 
         self.original_text.tag_configure(
             "removed", foreground="#8b1a1a", background="#ffe5e5", overstrike=True
@@ -156,6 +164,7 @@ class ReviewPanel(ttk.Frame):
         self.hunk_tree.heading("decision", text="Decision")
         self.hunk_tree.column("change", width=520, stretch=True)
         self.hunk_tree.column("decision", width=110, stretch=False)
+        self.hunk_tree.tag_configure("explanation", foreground="#6b7280", font=("Segoe UI", 9))
         self.hunk_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=4)
         hunk_actions = ttk.Frame(self.details_frame)
         hunk_actions.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -193,6 +202,7 @@ class ReviewPanel(ttk.Frame):
         """Display a new editing session."""
         self.session = session
         self.current_index = 0
+        self.scope_var.set("Reviewing the selected passage only" if session.selection else "")
         self._refresh()
 
     def _current_item(self):
@@ -227,12 +237,12 @@ class ReviewPanel(ttk.Frame):
         if not self.session:
             return
         radius = 180
-        before = self.session.original_text[
-            max(0, item.original_start - radius):item.original_start
-        ]
-        after = self.session.original_text[
-            item.original_end:min(len(self.session.original_text), item.original_end + radius)
-        ]
+        # with a selection the context comes from the whole editor text around it
+        text = self.session.context_text
+        start = self.session.context_offset + item.original_start
+        end = self.session.context_offset + item.original_end
+        before = text[max(0, start - radius):start]
+        after = text[end:min(len(text), end + radius)]
         context = "{0}[ current suggestion ]{1}".format(before, after)
         self.context_text.configure(state=tk.NORMAL)
         self.context_text.delete("1.0", tk.END)
@@ -252,12 +262,36 @@ class ReviewPanel(ttk.Frame):
         for index, hunk in enumerate(item.hunks):
             if not hunk.is_change:
                 continue
+            iid = "h{0}".format(index)
             self.hunk_tree.insert(
                 "",
                 tk.END,
-                iid="h{0}".format(index),
+                iid=iid,
                 values=(self._display_change(hunk), DECISION_LABELS[hunk.decision]),
+                open=True,
             )
+            if hunk.explanation:
+                # a grey line under the hunk; selecting it counts as selecting the hunk
+                self.hunk_tree.insert(
+                    iid, tk.END, iid="e{0}".format(index), values=("      \u21b3 " + hunk.explanation, ""),
+                    tags=("explanation",),
+                )
+
+    def _render_explanations(self, item):
+        """One grey line per explained change under the suggestion (hidden when there are none)."""
+        explanations = []
+        for hunk in item.changed_hunks:
+            if hunk.explanation and hunk.explanation not in explanations:
+                explanations.append(hunk.explanation)
+        if not explanations:
+            self.explanation_var.set("")
+            self.explanation_label.pack_forget()
+            return
+        if len(explanations) == 1:
+            self.explanation_var.set("Why: " + explanations[0])
+        else:
+            self.explanation_var.set("Why:\n" + "\n".join("\u2022 " + text for text in explanations))
+        self.explanation_label.pack(fill=tk.X, padx=6, pady=(0, 6))
 
     def _refresh(self):
         item = self._current_item()
@@ -273,6 +307,7 @@ class ReviewPanel(ttk.Frame):
             style="{0}.ReviewDecision.TLabel".format(decision.title())
         )
         self._render_comparison(item)
+        self._render_explanations(item)
         self._render_hunks(item)
         self._render_context(item)
         self.previous_button.configure(
@@ -334,7 +369,7 @@ class ReviewPanel(ttk.Frame):
         if not item or not selection:
             self.on_status("Select an individual change first.")
             return None
-        return item.hunks[int(selection[0][1:])]
+        return item.hunks[int(selection[0][1:])]  # "h3" or its explanation row "e3"
 
     def accept_hunk(self):
         hunk = self._selected_hunk()

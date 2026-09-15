@@ -6,6 +6,7 @@ from core.settings import (
     BACKEND_OLLAMA,
     BACKEND_REMOTE,
     DEFAULT_OLLAMA_MODEL,
+    RECENT_FILES_LIMIT,
     AppSettings,
 )
 
@@ -125,3 +126,70 @@ def test_unknown_backend_and_models_are_ignored(tmp_path):
 
     assert settings.backend == BACKEND_OLLAMA
     assert settings.models == {"ollama": "phi"}
+
+
+def test_custom_modes_and_chains_round_trip_and_invalid_entries_are_dropped(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings.load(path, environ={})
+    assert settings.custom_modes == [] and settings.chains == []
+    settings.custom_modes = [{"name": "House style", "instruction": "Apply it."}]
+    settings.chains = [{"name": "Tidy", "steps": ["Grammar", "House style"]}]
+    assert settings.save() is None
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["custom_modes"] == [{"name": "House style", "instruction": "Apply it."}]
+    assert stored["chains"] == [{"name": "Tidy", "steps": ["Grammar", "House style"]}]
+
+    reloaded = AppSettings.load(path, environ={})
+    assert reloaded.custom_modes == settings.custom_modes and reloaded.chains == settings.chains
+    assert reloaded.custom_mode_names() == ["House style"] and reloaded.chain_names() == ["Tidy"]
+    assert reloaded.find_chain("Tidy") == ["Grammar", "House style"] and reloaded.find_chain("x") is None
+    assert reloaded.load_error == ""
+
+    path.write_text(json.dumps({
+        "custom_modes": [{"name": "Grammar", "instruction": "x"}, {"name": "Ok", "instruction": "y"}, 5],
+        "chains": [{"name": "Broken", "steps": ["Ok", "Translate"]}, {"name": "Fine", "steps": ["Ok", "Polish"]}],
+    }), encoding="utf-8")
+    damaged = AppSettings.load(path, environ={})
+    assert damaged.custom_modes == [{"name": "Ok", "instruction": "y"}]
+    assert damaged.chains == [{"name": "Fine", "steps": ["Ok", "Polish"]}]
+    assert "Ignored 3 invalid custom mode/chain entries" in damaged.load_error
+
+
+def test_recent_files_keep_order_cap_and_prune_missing_files(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings.load(path, environ={})
+    assert settings.recent_files == []
+    files = []
+    for number in range(RECENT_FILES_LIMIT + 2):
+        file = tmp_path / "doc{0}.txt".format(number)
+        file.write_text("x", encoding="utf-8")
+        files.append(str(file))
+        settings.remember_file(file)
+    assert len(settings.recent_files) == RECENT_FILES_LIMIT
+    assert settings.recent_files[0] == files[-1] and files[0] not in settings.recent_files
+
+    settings.remember_file(files[3])  # re-opening moves a file to the front without duplicating it
+    assert settings.recent_files[0] == files[3] and settings.recent_files.count(files[3]) == 1
+    assert settings.save() is None
+    assert json.loads(path.read_text(encoding="utf-8"))["recent_files"] == settings.recent_files
+
+    (tmp_path / "doc3.txt").unlink()
+    reloaded = AppSettings.load(path, environ={})
+    assert files[3] not in reloaded.recent_files
+    assert reloaded.recent_files == [entry for entry in settings.recent_files if entry != files[3]]
+    reloaded.forget_file(files[-1])
+    assert files[-1] not in reloaded.recent_files
+
+    path.write_text(json.dumps({"recent_files": "not a list"}), encoding="utf-8")
+    assert AppSettings.load(path, environ={}).recent_files == []
+
+
+def test_quick_explanations_default_off_seeded_by_env_and_persisted(tmp_path):
+    path = tmp_path / "settings.json"
+    assert AppSettings.load(path, environ={}).quick_explanations is False
+    assert AppSettings.load(path, environ={"TEAI_QUICK_EXPLAIN": "yes"}).quick_explanations is True
+    settings = AppSettings.load(path, environ={})
+    settings.quick_explanations = True
+    settings.save()
+    assert json.loads(path.read_text(encoding="utf-8"))["quick_explanations"] is True
+    assert AppSettings.load(path, environ={"TEAI_QUICK_EXPLAIN": "no"}).quick_explanations is True  # file wins

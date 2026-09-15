@@ -14,6 +14,8 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .prompts import validate_chains, validate_custom_modes
+
 SETTINGS_FILENAME = "TextEnhanceAI-settings.json"
 BACKEND_OLLAMA = "ollama"
 BACKEND_REMOTE = "remote"
@@ -25,6 +27,7 @@ BACKEND_LABELS = {
 DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
 UI_LANGUAGE_AUTO = "auto"
 UI_LANGUAGES = (UI_LANGUAGE_AUTO, "en", "de")  # "auto" follows the OS locale
+RECENT_FILES_LIMIT = 10
 
 _ENV_TRUE = {"1", "true", "yes", "on"}
 
@@ -56,6 +59,10 @@ class AppSettings:
     default_style_guide: str = ""  # pre-fills "Author's instructions" for new review projects
     default_glossary: list = field(default_factory=list)  # pre-fills "Protected terms"
     default_evaluation_mode: str = "combined"  # "combined" or "separate", see core.workflow
+    custom_modes: list = field(default_factory=list)  # [{"name", "instruction"}], see core.prompts
+    chains: list = field(default_factory=list)  # [{"name", "steps"}], steps are built-in or custom mode names
+    recent_files: list = field(default_factory=list)  # quick-editor files, most recent first
+    quick_explanations: bool = False  # ask the model to explain each change in the quick editor (one extra request)
     path: Path = field(default=None, repr=False, compare=False)
     load_error: str = field(default="", repr=False, compare=False)
 
@@ -70,6 +77,10 @@ class AppSettings:
         "default_style_guide",
         "default_glossary",
         "default_evaluation_mode",
+        "custom_modes",
+        "chains",
+        "recent_files",
+        "quick_explanations",
     )
 
     # ------------------------------------------------------------ persistence
@@ -125,6 +136,25 @@ class AppSettings:
         ] if isinstance(glossary, list) else []
         mode = str(data.get("default_evaluation_mode") or environ.get("TEAI_EVALUATION_MODE", "") or "").strip().lower()
         settings.default_evaluation_mode = mode if mode in ("combined", "separate") else "combined"
+        settings.custom_modes, problems = validate_custom_modes(data.get("custom_modes"))
+        settings.chains, chain_problems = validate_chains(data.get("chains"), settings.custom_modes)
+        problems += chain_problems
+        if problems:
+            note = "Ignored {0} invalid custom mode/chain entr{1}: {2}.".format(
+                len(problems), "y" if len(problems) == 1 else "ies", "; ".join(problems[:3])
+            )
+            settings.load_error = (settings.load_error + " " + note).strip()
+        if "quick_explanations" in data:
+            settings.quick_explanations = bool(data["quick_explanations"])
+        else:
+            settings.quick_explanations = _env_bool(environ.get("TEAI_QUICK_EXPLAIN"), False)
+        recent = data.get("recent_files")
+        settings.recent_files = []
+        for entry in (recent if isinstance(recent, list) else []):
+            entry = str(entry or "").strip()
+            if entry and entry not in settings.recent_files and Path(entry).is_file():
+                settings.recent_files.append(entry)  # files that vanished are pruned
+        settings.recent_files = settings.recent_files[:RECENT_FILES_LIMIT]
 
         env_model = environ.get("TEAI_MODEL", "").strip()
         if settings.backend not in settings.models and env_model:
@@ -159,6 +189,28 @@ class AppSettings:
         """Store the model chosen for a backend."""
         if model:
             self.models[backend] = model
+
+    def remember_file(self, path):
+        """Put ``path`` at the front of the recent-files list (at most RECENT_FILES_LIMIT entries)."""
+        path = str(path)
+        self.recent_files = [path] + [entry for entry in self.recent_files if entry != path]
+        del self.recent_files[RECENT_FILES_LIMIT:]
+
+    def forget_file(self, path):
+        self.recent_files = [entry for entry in self.recent_files if entry != str(path)]
+
+    def custom_mode_names(self):
+        return [entry["name"] for entry in self.custom_modes]
+
+    def chain_names(self):
+        return [entry["name"] for entry in self.chains]
+
+    def find_chain(self, name):
+        """The step names of the chain called ``name`` (None when unknown)."""
+        for entry in self.chains:
+            if entry["name"] == name:
+                return list(entry["steps"])
+        return None
 
     @property
     def remote_configured(self):

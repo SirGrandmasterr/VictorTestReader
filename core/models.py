@@ -1,7 +1,7 @@
 """Data models for a reviewable editing session."""
 
 from dataclasses import dataclass, field
-from typing import List, Union
+from typing import List, Optional, Tuple, Union
 
 
 PENDING = "pending"
@@ -18,6 +18,7 @@ class ChangeHunk:
     original_text: str
     proposed_text: str
     decision: str = PENDING
+    explanation: str = ""  # one line from the model or a canned sentence, see core.editing.explain_session
 
     @property
     def is_change(self):
@@ -82,8 +83,23 @@ SessionPart = Union[str, ReviewItem]
 
 
 @dataclass
+class ChainStep:
+    """One step of a chained edit: the mode name, its instruction and what the model returned."""
+
+    name: str
+    instruction: str
+    output: str = ""
+
+
+@dataclass
 class EditSession:
-    """Original, proposed, and review state for one LLM edit."""
+    """Original, proposed, and review state for one LLM edit.
+
+    ``original_text`` is what was sent to the model. When only a selection
+    was edited, ``selection`` holds its ``(start, end)`` character offsets in
+    ``full_text``, the complete editor text at the time of the request, and
+    applying the review replaces exactly that span.
+    """
 
     original_text: str
     proposed_text: str
@@ -93,6 +109,19 @@ class EditSession:
     parts: List[SessionPart] = field(default_factory=list)
     review_items: List[ReviewItem] = field(default_factory=list)
     state: str = "reviewing"
+    selection: Optional[Tuple[int, int]] = None
+    full_text: str = ""
+    steps: List[ChainStep] = field(default_factory=list)  # every step of a chain, in order
+
+    @property
+    def context_text(self):
+        """The text surrounding suggestions: the whole document when a selection was edited."""
+        return self.full_text if self.selection else self.original_text
+
+    @property
+    def context_offset(self):
+        """Offset of ``original_text`` inside ``context_text``."""
+        return self.selection[0] if self.selection else 0
 
     @property
     def pending_count(self):
