@@ -42,8 +42,9 @@ from core.text_positions import char_offset, normalise_span, tk_index
 from core.workflow import CHECK_LABELS, STREAM_EVENT
 from .connection_dialog import ConnectionDialog
 from .dialogs import ShortcutsDialog, ask_name
-from .i18n import N_, current_language, format_number, resolve_language, set_language, tr
+from .i18n import N_, format_number, set_language, tr
 from .mode_dialog import ManageModesDialog
+from .preferences_dialog import PreferencesDialog
 from .review_panel import ReviewPanel
 from .theme import Toast, Tooltip, apply_theme, font, style_text, subscribe
 from .thinking_window import StreamLog, ThinkingWindow
@@ -207,6 +208,11 @@ class EditorApp:
         self.file_menu.add_separator()
         self.file_menu.add_command(label=tr("Quit"), underline=0, command=self.close)
         menubar.add_cascade(label=tr("File"), underline=0, menu=self.file_menu)
+        edit_menu = tk.Menu(menubar, tearoff=False)
+        edit_menu.add_command(label=tr("Manage modes..."), underline=0, command=self.open_mode_dialog)
+        edit_menu.add_separator()
+        edit_menu.add_command(label=tr("Preferences..."), underline=0, accelerator="Ctrl+,", command=self.open_preferences)
+        menubar.add_cascade(label=tr("Edit"), underline=0, menu=edit_menu)
         view_menu = tk.Menu(menubar, tearoff=False)
         view_menu.add_command(label=tr("Larger text"), underline=0, accelerator="Ctrl++", command=lambda: self.zoom(1))
         view_menu.add_command(label=tr("Smaller text"), underline=0, accelerator="Ctrl+-", command=lambda: self.zoom(-1))
@@ -617,6 +623,7 @@ class EditorApp:
         self.root.bind_all("<Control-Return>", self._primary_shortcut)
         self.root.bind_all("<Control-Shift-KeyPress-T>", self.show_thinking)
         self.root.bind_all("<F1>", self.show_shortcuts)
+        self.root.bind_all("<Control-comma>", self.open_preferences)
         self.root.bind_all("<Control-KeyPress-o>", self._open_shortcut)
         self.root.bind_all("<Control-KeyPress-O>", self._open_shortcut)
         self.root.bind_all("<Control-KeyPress-s>", self._save_shortcut)
@@ -917,6 +924,23 @@ class EditorApp:
     def open_mode_dialog(self):
         ManageModesDialog(self.root, self.settings.custom_modes, self.settings.chains, on_save=self._apply_modes)
 
+    def open_preferences(self, event=None):
+        PreferencesDialog(self.root, self.settings, on_save=self._apply_preferences)
+        return "break" if event else None
+
+    def _apply_preferences(self, settings, language_changed):
+        """Everything but the language takes effect at once; the language needs a restart."""
+        self.settings = settings
+        self._save_settings()
+        self.high_contrast_var.set(bool(settings.high_contrast))
+        apply_theme(self.root, high_contrast=settings.high_contrast, scale=settings.ui_scale)
+        self.explain_var.set(bool(settings.quick_explanations))
+        self._refresh_mode_values()
+        if language_changed:
+            self.set_status(tr("Restart TextEnhanceAI to apply the language."))
+        else:
+            self.notify(tr("Preferences saved."))
+
     def _apply_modes(self, modes, chains):
         self.settings.custom_modes = modes
         self.settings.chains = chains
@@ -1052,8 +1076,6 @@ class EditorApp:
         self._save_settings()
         self._refresh_backend_values()
         self._switch_backend(settings.backend)
-        if resolve_language(settings.ui_language) != current_language():
-            self.set_status(tr("Restart TextEnhanceAI to apply the language."))
 
     # --------------------------------------------------------- model discovery
     def refresh_models(self):
