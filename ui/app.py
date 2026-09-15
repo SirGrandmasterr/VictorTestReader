@@ -60,6 +60,7 @@ MODE_AUTO = "auto"
 SEPARATOR_CUSTOM = N_("\u2014 Custom modes \u2014")  # unselectable headings in the mode list
 SEPARATOR_CHAINS = N_("\u2014 Chains \u2014")
 APP_TITLE = "TextEnhanceAI - V {0}".format(__version__)
+APPLIED_HISTORY_LIMIT = 20  # applied reviews that can be undone in the quick editor
 # (label, pattern) pairs of the file dialogs; the labels are translated by file_types()
 FILE_TYPES = [
     (N_("Documents"), MANUSCRIPT_PATTERNS),
@@ -147,7 +148,8 @@ class EditorApp:
         self._progress_chars = 0
         self.current_session = None
         self.current_logger = None
-        self.last_applied_source = None
+        self.applied_history = []  # (before, after, mode label) of every applied review, oldest first
+        self.redo_history = []
         self._suppress_modified = False
         self.mode = MODE_QUICK
         self._controls_locked = False
@@ -417,16 +419,16 @@ class EditorApp:
             justify=tk.LEFT,
         )
         self.mode_description.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.undo_button = ttk.Button(
-            below,
-            text=tr("Undo applied review"),
-            style="Small.Surface.Ghost.TButton",
-            command=self.undo_applied_review,
-        )
-        self.undo_button.pack(side=tk.RIGHT, padx=(10, 0))
-        self.undo_button.pack_forget()  # shown once a review was applied
+        history = ttk.Frame(below, style="Surface.TFrame")  # Undo / Redo of applied reviews, shown when there are any
+        history.pack(side=tk.RIGHT, padx=(10, 0))
+        self.undo_button = ttk.Button(history, text=tr("Undo applied review"), style="Small.Surface.Ghost.TButton",
+                                      command=self.undo_applied_review)
+        self.undo_tooltip = Tooltip(self.undo_button, "")
+        self.redo_button = ttk.Button(history, text=tr("Redo"), style="Small.Surface.Ghost.TButton",
+                                      command=self.redo_applied_review)
+        Tooltip(self.redo_button, tr("Apply the review you just undid again."))
         controls.bind("<Configure>", lambda event: self.mode_description.configure(
-            wraplength=max(240, event.width - 40 - (self.undo_button.winfo_reqwidth() if self.undo_button.winfo_ismapped() else 0))))
+            wraplength=max(240, event.width - 40 - history.winfo_reqwidth())))
         self._build_instruction_box(controls)
         self.scope_var = tk.StringVar(value="")
         self.scope_row = ttk.Frame(controls, style="Surface.TFrame")
@@ -596,12 +598,6 @@ class EditorApp:
         self.text_area.tag_remove("sel", "1.0", tk.END)
         self._on_selection_changed()
         self.text_area.focus_set()
-
-    def _show_undo(self, shown):
-        if shown:
-            self.undo_button.pack(side=tk.RIGHT, padx=(10, 0))
-        else:
-            self.undo_button.pack_forget()
 
     def _update_document_heading(self):
         if self.current_path is not None:
@@ -1470,18 +1466,44 @@ class EditorApp:
             if span is None:
                 self.set_status(tr("The editor text changed; the selected passage could not be found, so nothing was applied."))
                 return
-        self.last_applied_source = current
         session.state = "applied"
         if self.current_logger:
             self.current_logger.log_outcome(session, "applied", final_text)
         if span:
             start, end = span
-            self._set_editor_text(current[:start] + final_text + current[end:])
-            self._select_span(start, start + len(final_text))
+            new_text = current[:start] + final_text + current[end:]
         else:
-            self._set_editor_text(final_text)
-        self._show_undo(True)
+            new_text = final_text
+        self._remember_applied(current, new_text, self._mode_key())
+        self._set_editor_text(new_text)
+        if span:
+            self._select_span(span[0], span[0] + len(final_text))
         self._leave_review(tr("Reviewed changes applied."))
+
+    # ------------------------------------------------------- applied history
+    def _remember_applied(self, before, after, label):
+        """Push one applied review onto the undo stack (the newest APPLIED_HISTORY_LIMIT are kept)."""
+        self.applied_history.append((before, after, self.mode_label(label)))
+        del self.applied_history[:-APPLIED_HISTORY_LIMIT]
+        self.redo_history = []
+        self._update_history_buttons()
+
+    def _update_history_buttons(self):
+        if self.applied_history:
+            self.undo_button.pack(side=tk.LEFT)
+            self.undo_tooltip.text = tr("Undo the last applied review ({label}); {count} more can be undone.",
+                                        label=self.applied_history[-1][2], count=len(self.applied_history) - 1)
+        else:
+            self.undo_button.pack_forget()
+        if self.redo_history:
+            self.redo_button.pack(side=tk.LEFT, padx=(6, 0))
+        else:
+            self.redo_button.pack_forget()
+
+    def _clear_applied_history(self):
+        self.applied_history = []
+        self.redo_history = []
+        self._update_history_buttons()
 
     @staticmethod
     def _locate_selection(current, session):
@@ -1516,11 +1538,17 @@ class EditorApp:
         self.text_area.focus_set()
 
     def _set_editor_text(self, text, modified=True):
-        """Replace the editor text; ``modified=False`` when it now matches the file on disk."""
+        """Replace the editor text; ``modified=False`` when it now matches the file on disk.
+
+        The replacement is one step of the widget's own undo (Ctrl+Z), not a
+        delete and an insert.
+        """
         self._suppress_modified = True
         self.text_area.configure(state=tk.NORMAL)
+        self.text_area.edit_separator()
         self.text_area.delete("1.0", tk.END)
         self.text_area.insert("1.0", text)
+        self.text_area.edit_separator()
         self.text_area.edit_modified(False)
         self._suppress_modified = False
         self.revision_id += 1
@@ -1528,13 +1556,23 @@ class EditorApp:
         self._set_modified(modified)
 
     def undo_applied_review(self):
-        if self.last_applied_source is None:
+        """Put the text back the way it was before the newest applied review (any number of times)."""
+        if not self.applied_history or self.generating:
             return
-        source = self.last_applied_source
-        self.last_applied_source = None
-        self._set_editor_text(source)
-        self._show_undo(False)
-        self.set_status(tr("The last applied review was undone."))
+        before, after, label = self.applied_history.pop()
+        self.redo_history.append((before, after, label))
+        self._set_editor_text(before)
+        self._update_history_buttons()
+        self.set_status(tr("Undid the applied review ({label}).", label=label))
+
+    def redo_applied_review(self):
+        if not self.redo_history or self.generating:
+            return
+        before, after, label = self.redo_history.pop()
+        self.applied_history.append((before, after, label))
+        self._set_editor_text(after)
+        self._update_history_buttons()
+        self.set_status(tr("Applied the review again ({label}).", label=label))
 
     # ------------------------------------------------------------------- files
     def _confirm_discard(self):
@@ -1570,8 +1608,7 @@ class EditorApp:
             self.discard_review(self.current_session)  # a review of the old text makes no sense any more
         self.current_path = Path(path)
         self.current_document = document
-        self.last_applied_source = None
-        self._show_undo(False)
+        self._clear_applied_history()
         self._set_editor_text(document.text, modified=False)
         self.settings.remember_file(self.current_path)
         self._save_settings()

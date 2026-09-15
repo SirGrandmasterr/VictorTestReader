@@ -73,6 +73,21 @@ def test_selection_is_located_in_the_current_text_or_rejected():
     assert EditorApp._locate_selection("Gone.", session) is None
 
 
+def test_applied_history_is_capped_and_a_new_apply_clears_redo():
+    from ui.app import APPLIED_HISTORY_LIMIT
+
+    app = EditorApp.__new__(EditorApp)
+    app.applied_history = []
+    app.redo_history = [("old", "new", "Polish")]
+    app._update_history_buttons = lambda: None
+    for number in range(APPLIED_HISTORY_LIMIT + 5):
+        app._remember_applied("before {0}".format(number), "after {0}".format(number), "Grammar")
+    assert len(app.applied_history) == APPLIED_HISTORY_LIMIT
+    assert app.applied_history[-1] == ("before 24", "after 24", "Grammar")
+    assert app.applied_history[0] == ("before 5", "after 5", "Grammar")
+    assert app.redo_history == []
+
+
 def test_window_title_shows_file_name_and_unsaved_marker():
     from ui.app import APP_TITLE, window_title
 
