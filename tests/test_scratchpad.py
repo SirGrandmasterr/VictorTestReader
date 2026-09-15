@@ -48,3 +48,14 @@ def test_discarded_session_is_logged_without_losing_proposal(tmp_path):
     assert "## Suggestions" in content
     assert "Outcome: **discarded**" in content
     assert "Old text." in content
+
+
+def test_selection_only_sessions_record_the_span(tmp_path):
+    full = "Keep. Teh cat. Keep."
+    session = build_edit_session("Teh cat.", "The cat.", selection=(6, 14), full_text=full)
+    logger = ScratchpadLogger(tmp_path, now_provider=lambda: datetime(2026, 7, 12, 10, 11, 14))
+
+    content = logger.log_proposal(session).read_text(encoding="utf-8")
+
+    assert "- Selection: chars 6–14 of 20 characters" in content
+    assert "Keep." not in content.split("## Original text")[1].split("## Proposed text")[0]

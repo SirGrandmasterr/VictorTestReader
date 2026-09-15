@@ -3,6 +3,8 @@
 from datetime import datetime
 from pathlib import Path
 
+from .text_positions import describe_span
+
 
 class ScratchpadLogger:
     """Write proposal and decision records for one app run."""
@@ -31,6 +33,12 @@ class ScratchpadLogger:
             "# TextEnhanceAI editing session\n",
             "- Model: `{0}`\n".format(session.model),
             "- Instruction: {0}\n".format(session.instruction),
+        ]
+        if session.selection:
+            lines.append("- Selection: {0} of {1} characters\n".format(
+                describe_span(session.selection), len(session.full_text)
+            ))
+        lines += [
             "- Suggestions: {0}\n\n".format(len(session.review_items)),
             "## Original text\n\n",
             self._block(session.original_text),

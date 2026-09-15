@@ -178,8 +178,14 @@ def build_edit_session(
     instruction="",
     model="",
     revision_id=0,
+    selection=None,
+    full_text="",
 ):
-    """Create an EditSession from original and proposed text."""
+    """Create an EditSession from original and proposed text.
+
+    ``selection``/``full_text`` record that ``original_text`` is only the
+    selected span of the editor text (see ``EditSession``).
+    """
     original_units = _sentence_units(original_text)
     proposed_units = _sentence_units(proposed_text)
     original_keys = [_normalise_sentence(unit) for unit in original_units]
@@ -198,6 +204,8 @@ def build_edit_session(
         instruction=instruction,
         model=model,
         revision_id=revision_id,
+        selection=tuple(selection) if selection else None,
+        full_text=full_text if selection else "",
     )
 
     next_item_id = 1

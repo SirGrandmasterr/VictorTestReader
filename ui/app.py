@@ -21,6 +21,7 @@ from core.settings import (
     SETTINGS_FILENAME,
     AppSettings,
 )
+from core.text_positions import char_offset, normalise_span, tk_index
 from .connection_dialog import ConnectionDialog
 from .i18n import current_language, resolve_language, set_language, tr
 from .review_panel import ReviewPanel
@@ -63,6 +64,7 @@ class EditorApp:
         self.generating = False
         self.generation_started_at = None
         self.generation_label = ""
+        self.generation_verb = "Generating review"  # or "Editing selection (N words)"
         self._progress_chars = 0
         self.current_session = None
         self.current_logger = None
@@ -559,12 +561,27 @@ class EditorApp:
             return build_instruction(mode, custom.strip())
         return build_instruction(mode)
 
+    def _current_selection(self, full_text):
+        """The editor selection as ``(start, end)`` character offsets, or None."""
+        try:
+            ranges = self.text_area.tag_ranges("sel")
+        except tk.TclError:
+            return None
+        if len(ranges) < 2:
+            return None
+        return normalise_span(full_text, char_offset(full_text, str(ranges[0])), char_offset(full_text, str(ranges[1])))
+
     def start_review(self):
         if self.generating:
             return
-        source = self.text_area.get("1.0", "end-1c")
+        full_text = self.text_area.get("1.0", "end-1c")
+        selection = self._current_selection(full_text)
+        source = full_text[selection[0]:selection[1]] if selection else full_text
         if not source.strip():
-            messagebox.showinfo("TextEnhanceAI", "Enter or paste text to edit.")
+            if selection:
+                messagebox.showinfo("TextEnhanceAI", "The selected passage contains no text. Select text or clear the selection.")
+            else:
+                messagebox.showinfo("TextEnhanceAI", "Enter or paste text to edit.")
             return
         model = self.model_var.get().strip()
         if not model:
@@ -587,6 +604,10 @@ class EditorApp:
         self.generating = True
         self.generation_started_at = time.time()
         self.generation_label = "{0} via {1}".format(model, service.display_name)
+        if selection:
+            self.generation_verb = "Editing selection ({0} words)".format(len(re.findall(r"\S+", source)))
+        else:
+            self.generation_verb = "Generating review"
         self._progress_chars = 0
         self._set_generating_state(True)
         cancel_event = self.cancel_event
@@ -608,6 +629,8 @@ class EditorApp:
                         result,
                         instruction,
                         model,
+                        selection,
+                        full_text,
                     )
                 )
             except EditCancelled as exc:
@@ -629,7 +652,7 @@ class EditorApp:
             self.progress.pack(side=tk.LEFT, before=self.status_label)
             self.cancel_button.pack(side=tk.LEFT, padx=6, before=self.status_label)
             self.progress.start(12)
-            self.set_status("Generating review with {0}...".format(self.generation_label))
+            self.set_status("{0} with {1}...".format(self.generation_verb, self.generation_label))
         else:
             self.progress.stop()
             self.progress.pack_forget()
@@ -655,6 +678,8 @@ class EditorApp:
             proposed,
             instruction,
             model,
+            selection,
+            full_text,
         ) = event
         if request_id != self.active_request_id:
             return
@@ -671,6 +696,8 @@ class EditorApp:
             instruction=instruction,
             model=model,
             revision_id=revision_id,
+            selection=selection,
+            full_text=full_text,
         )
         self.current_logger = ScratchpadLogger(self.app_directory)
         self.current_logger.log_proposal(session)
@@ -734,8 +761,8 @@ class EditorApp:
             else:
                 progress = " · waiting for the first tokens"
             self.set_status(
-                "Generating review with {0}... {1}s elapsed{2}".format(
-                    self.generation_label, elapsed, progress
+                "{0} with {1}... {2}s elapsed{3}".format(
+                    self.generation_verb, self.generation_label, elapsed, progress
                 )
             )
         try:
@@ -749,13 +776,43 @@ class EditorApp:
             self.set_status("Review every pending change before applying.")
             return
         final_text = render_reviewed_text(session)
-        self.last_applied_source = session.original_text
+        current = self.text_area.get("1.0", "end-1c")
+        span = None
+        if session.selection:
+            span = self._locate_selection(current, session)
+            if span is None:
+                self.set_status("The editor text changed; the selected passage could not be found, so nothing was applied.")
+                return
+        self.last_applied_source = current
         session.state = "applied"
         if self.current_logger:
             self.current_logger.log_outcome(session, "applied", final_text)
-        self._set_editor_text(final_text)
+        if span:
+            start, end = span
+            self._set_editor_text(current[:start] + final_text + current[end:])
+            self._select_span(start, start + len(final_text))
+        else:
+            self._set_editor_text(final_text)
         self.undo_button.configure(state=tk.NORMAL)
         self._leave_review("Reviewed changes applied.")
+
+    @staticmethod
+    def _locate_selection(current, session):
+        """Where the edited selection sits in the current editor text (None when it is gone)."""
+        start, end = session.selection
+        if current[start:end] == session.original_text:
+            return start, end
+        if current.count(session.original_text) == 1:
+            start = current.index(session.original_text)
+            return start, start + len(session.original_text)
+        return None
+
+    def _select_span(self, start, end):
+        text = self.text_area.get("1.0", "end-1c")
+        self.text_area.tag_remove("sel", "1.0", tk.END)
+        self.text_area.tag_add("sel", tk_index(text, start), tk_index(text, end))
+        self.text_area.mark_set("insert", tk_index(text, end))
+        self.text_area.see(tk_index(text, start))
 
     def discard_review(self, session):
         session.state = "discarded"

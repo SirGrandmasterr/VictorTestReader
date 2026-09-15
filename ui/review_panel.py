@@ -56,6 +56,9 @@ class ReviewPanel(ttk.Frame):
             style="Pending.ReviewDecision.TLabel",
         )
         self.decision_label.pack(side=tk.LEFT, padx=12)
+        self.scope_var = tk.StringVar(value="")
+        self.scope_label = ttk.Label(header, textvariable=self.scope_var, foreground="#6b7280")
+        self.scope_label.pack(side=tk.LEFT, padx=(0, 12))
 
         self.context_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -193,6 +196,7 @@ class ReviewPanel(ttk.Frame):
         """Display a new editing session."""
         self.session = session
         self.current_index = 0
+        self.scope_var.set("Reviewing the selected passage only" if session.selection else "")
         self._refresh()
 
     def _current_item(self):
@@ -227,12 +231,12 @@ class ReviewPanel(ttk.Frame):
         if not self.session:
             return
         radius = 180
-        before = self.session.original_text[
-            max(0, item.original_start - radius):item.original_start
-        ]
-        after = self.session.original_text[
-            item.original_end:min(len(self.session.original_text), item.original_end + radius)
-        ]
+        # with a selection the context comes from the whole editor text around it
+        text = self.session.context_text
+        start = self.session.context_offset + item.original_start
+        end = self.session.context_offset + item.original_end
+        before = text[max(0, start - radius):start]
+        after = text[end:min(len(text), end + radius)]
         context = "{0}[ current suggestion ]{1}".format(before, after)
         self.context_text.configure(state=tk.NORMAL)
         self.context_text.delete("1.0", tk.END)

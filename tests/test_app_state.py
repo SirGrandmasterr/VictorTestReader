@@ -31,6 +31,8 @@ def test_stale_revision_result_is_discarded_before_session_creation():
         "Proposed text.",
         "Fix grammar.",
         "model",
+        None,
+        "",
     )
 
     app._handle_generation_result(event)
@@ -50,6 +52,8 @@ def test_result_from_superseded_request_is_ignored():
         "Proposed text.",
         "Fix grammar.",
         "model",
+        None,
+        "",
     )
 
     app._handle_generation_result(event)
@@ -68,3 +72,16 @@ def test_cancelled_active_request_restores_idle_state():
     assert app.status_messages[-1] == (
         "Generation cancelled. Your text was not changed."
     )
+
+
+def test_selection_is_located_in_the_current_text_or_rejected():
+    from core.diff_engine import build_edit_session
+
+    full = "Start. Teh cat sat. End."
+    session = build_edit_session("Teh cat sat.", "The cat sat.", selection=(7, 19), full_text=full)
+
+    assert EditorApp._locate_selection(full, session) == (7, 19)
+    # text inserted before the selection: the passage is found again when it is unique
+    assert EditorApp._locate_selection("More. " + full, session) == (13, 25)
+    assert EditorApp._locate_selection("Teh cat sat. Teh cat sat.", session) is None
+    assert EditorApp._locate_selection("Gone.", session) is None
