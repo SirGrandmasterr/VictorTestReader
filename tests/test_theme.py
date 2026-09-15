@@ -15,8 +15,17 @@ from core.workflow import (
     STATUS_REVIEWED,
 )
 from ui import theme
-from ui.review_panel import HUNK_KIND_LABELS, decision_text
-from ui.workflow_screen import STATE_LABELS, STATUS_LABELS, mark_spans, state_text, status_text
+from ui.review_panel import HUNK_KIND_LABELS, decision_text, display_text
+from ui.workflow_screen import (
+    STATE_LABELS,
+    STATUS_LABELS,
+    estimate_text,
+    mark_spans,
+    short_term,
+    state_text,
+    status_short,
+    status_text,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +50,7 @@ def test_select_palette_updates_the_shared_dictionaries_in_place():
     assert theme.STATUS_COLORS is statuses and statuses["error"] == palette["danger"]
     assert theme.select_palette(False) == "normal"
     assert not theme.is_high_contrast()
-    assert palette["text"] == "#1f2937"
+    assert palette["text"] == "#2a2521"
     assert set(statuses) == {STATUS_QUEUED, "running", STATUS_ERROR, STATUS_CLEAN, STATUS_READY, STATUS_REVIEWED}
 
 
@@ -51,8 +60,13 @@ def test_every_status_and_decision_state_has_a_glyph_and_a_word():
         text = status_text(status)
         assert text.startswith(theme.STATUS_GLYPHS[status] + " ")
         assert STATUS_LABELS[status] in text
-    assert theme.STATUS_GLYPHS["flagged"] == "⚠"
-    assert status_text(STATUS_READY, "2 pending") == "● To review · 2 pending"
+    assert theme.STATUS_GLYPHS["flagged"] == "◆"
+    assert status_text(STATUS_READY, "2 pending") == "○ To review · 2 pending"
+    # every status has its own shape, and none of them is a symbol Windows renders as a colour emoji
+    assert len(set(theme.STATUS_GLYPHS.values())) == len(theme.STATUS_GLYPHS)
+    emoji = {"⏳", "⚠", "✔", "✖", "▶"}
+    assert not emoji & set(theme.STATUS_GLYPHS.values())
+    assert not emoji & set(theme.DECISION_GLYPHS.values())
     for state in (STATE_APPLIED, STATE_SUPERSEDED, STATE_REJECTED, STATE_PENDING):
         assert theme.DECISION_GLYPHS[state]
         assert state_text(state) == "{0} {1}".format(theme.DECISION_GLYPHS[state], STATE_LABELS[state])
@@ -66,6 +80,35 @@ def test_quick_review_decisions_get_glyphs_and_hunk_kinds_get_words():
     assert decision_text(PENDING) == "○ Pending"
     assert decision_text("mixed") == "✎ Partially accepted"
     assert HUNK_KIND_LABELS == {"delete": "removed", "insert": "added", "replace": "replaced"}
+    # a hunk row never shows a bare symbol for "nothing" or a paragraph break
+    assert display_text("") == "(nothing)"
+    assert display_text("one\ntwo") == "one ¶ two"
+
+
+def test_tree_column_gets_the_short_status_with_the_same_glyph():
+    assert status_short(STATUS_READY, pending=3) == "○ 3 open"
+    assert status_short(STATUS_REVIEWED) == "● done"
+    assert status_short(STATUS_QUEUED) == "◌ queued"
+    assert status_short("running") == "◐ evaluating"
+    for status in (STATUS_QUEUED, "running", STATUS_ERROR, STATUS_CLEAN, STATUS_READY, STATUS_REVIEWED):
+        assert status_short(status).split(" ")[0] == status_text(status).split(" ")[0]
+    assert short_term("  a   name ") == "a name"
+    assert short_term("x" * 40) == "x" * 23 + "…"
+
+
+def test_start_view_estimate_turns_into_minutes_once_timing_is_known():
+    assert estimate_text(1240) == "≈ 1,240 model requests"
+    assert estimate_text(1240, None, 4) == "≈ 1,240 model requests"
+    assert estimate_text(3, 12.0) == "≈ 3 model requests · about a minute with this model"
+    assert estimate_text(120, 6.0, 1) == "≈ 120 model requests · about 12 min with this model"
+    assert estimate_text(120, 6.0, 4) == "≈ 120 model requests · about 3 min with this model"
+    assert estimate_text(1240, 9.0, 2) == "≈ 1,240 model requests · about 1 h 33 min with this model"
+
+
+def test_font_roles_put_the_authors_text_and_titles_in_the_serif_face():
+    assert theme.FONT_ROLES["text"][0] > theme.FONT_ROLES["body"][0]
+    assert set(theme.SERIF_ROLES) == {"title", "text"}
+    assert theme.FONT_ROLES["title"][1] == "normal"  # a page title, not a form heading
 
 
 def test_scale_clamping_and_scaled_sizes(monkeypatch):

@@ -66,6 +66,7 @@ from core.workflow import (
     resync_project,
     start_stream,
 )
+from .dialogs import reveal
 from .i18n import N_, format_number, tr
 from .theme import (
     CHECK_COLORS,
@@ -74,6 +75,7 @@ from .theme import (
     SPAN_MARKERS,
     STATUS_COLORS,
     STATUS_GLYPHS,
+    RowTooltip,
     ScrollableFrame,
     Tooltip,
     bind_restyle,
@@ -141,7 +143,9 @@ def explanation_text(change):
 
 
 def _flagged_note(stats):
-    return tr(" · {flagged} flagged ⚠", flagged=stats["flagged"]) if stats.get("flagged") else ""
+    if not stats.get("flagged"):
+        return ""
+    return tr(" · {flagged} flagged {glyph}", flagged=stats["flagged"], glyph=STATUS_GLYPHS["flagged"])
 
 
 def _suppressed_note(stats):
@@ -168,6 +172,20 @@ def _format_eta(seconds):
     if minutes < 60:
         return tr("~{minutes} min left", minutes=minutes)
     return tr("~{hours} h {minutes:02d} min left", hours=minutes // 60, minutes=minutes % 60)
+
+
+def estimate_text(requests, seconds_per_request=None, parallelism=1):
+    """What a review will cost in requests and, once this session has timing data, roughly in minutes."""
+    if not seconds_per_request:
+        return tr("≈ {requests} model requests", requests=format_number(requests))
+    minutes = requests * seconds_per_request / max(1, parallelism) / 60.0
+    if minutes < 1.5:
+        when = tr("about a minute with this model")
+    elif minutes < 90:
+        when = tr("about {minutes} min with this model", minutes=int(round(minutes)))
+    else:
+        when = tr("about {hours} h {minutes:02d} min with this model", hours=int(minutes // 60), minutes=int(minutes % 60))
+    return tr("≈ {requests} model requests · {when}", requests=format_number(requests), when=when)
 
 
 class StyleGuideBox(tk.Text):
@@ -478,11 +496,29 @@ def state_text(state):
 
 
 def status_text(status, detail=""):
-    """A segment status as glyph plus word with an optional detail, e.g. "● To review · 2 pending"."""
+    """A segment status as glyph plus word with an optional detail, e.g. "○ To review · 2 pending"."""
     label = tr(STATUS_LABELS[status]) if status in STATUS_LABELS else status
     if detail:
         label = "{0} · {1}".format(label, detail)
     return "{0} {1}".format(STATUS_GLYPHS.get(status, ""), label).strip()
+
+
+STATUS_SHORT = {  # what fits into the narrow tree column, next to the glyph
+    STATUS_QUEUED: N_("queued"),
+    "running": N_("evaluating"),
+    STATUS_ERROR: N_("error"),
+    STATUS_CLEAN: N_("no changes"),
+    STATUS_REVIEWED: N_("done"),
+}
+
+
+def status_short(status, pending=0, changes=0):
+    """The tree column's short form: "○ 3 open", "● done", "◌ queued" (glyph plus a word or a count)."""
+    if status == STATUS_READY:
+        word = tr("{pending} open", pending=pending)
+    else:
+        word = tr(STATUS_SHORT[status]) if status in STATUS_SHORT else status
+    return "{0} {1}".format(STATUS_GLYPHS.get(status, ""), word).strip()
 
 
 def mark_spans(text, spans, markers=SPAN_MARKERS):
@@ -869,18 +905,22 @@ class WorkflowScreen(ttk.Frame):
         except OSError as exc:
             messagebox.showerror(tr("Export failed"), tr("The export failed: {error}", error=exc))
             return
-        self.host.set_status(tr("Exported to {path}", path=paths.get("formatted") or paths["document"]))
-        message = tr("Reviewed manuscript:\n{document}\n\nChapter files:\n{folder}\n\nReport:\n{report}",
-                     document=paths["document"], folder=paths["document"].parent / "reviewed", report=paths["report"])
-        if paths.get("formatted"):
-            kind = self.project.document_kind
-            message = "{0} ({1}):\n{2}\n\n{3}\n\n{4}".format(
-                tr(KIND_LABELS[kind]) if kind in KIND_LABELS else tr("Document"), paths["formatted"].suffix,
-                paths["formatted"], tr(FORMATTING_NOTE), message,
-            )
+        exported = paths.get("formatted") or paths["document"]
+        self.host.set_status(tr("Exported to {path}", path=exported))
         if paths["warnings"]:
+            message = tr("Reviewed manuscript:\n{document}\n\nChapter files:\n{folder}\n\nReport:\n{report}",
+                         document=paths["document"], folder=paths["document"].parent / "reviewed", report=paths["report"])
+            if paths.get("formatted"):
+                kind = self.project.document_kind
+                message = "{0} ({1}):\n{2}\n\n{3}\n\n{4}".format(
+                    tr(KIND_LABELS[kind]) if kind in KIND_LABELS else tr("Document"), paths["formatted"].suffix,
+                    paths["formatted"], tr(FORMATTING_NOTE), message,
+                )
             message += "\n\n" + tr("Limitations:") + "\n- " + "\n- ".join(paths["warnings"])
-        messagebox.showinfo(tr("Export complete"), message)
+            messagebox.showwarning(tr("Exported with limitations"), message)
+            return
+        self.host.notify(tr("Exported {name}; the chapter files and the report are next to it.", name=exported.name),
+                         action=(tr("Open folder"), lambda: reveal(exported.parent)))
 
     # -------------------------------------------------------- relay status
     def _schedule_status_poll(self, delay=RELAY_STATUS_INTERVAL_MS):
@@ -1253,9 +1293,18 @@ class StartView(ttk.Frame):
             ttk.Checkbutton(row, text=tr("auto-accept"), variable=self.auto_vars[check],
                             style="Surface.TCheckbutton").pack(side=tk.RIGHT)
 
-        # --- splitting & model
-        options = self._card(body, tr("3. Splitting and evaluation"))
-        options.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        # --- the rest is tuning: shown on request
+        self.advanced_shown = False
+        self.advanced_button = ttk.Button(body, style="Ghost.TButton", command=self._toggle_advanced)
+        self.advanced_button.grid(row=2, column=0, sticky="w", pady=(0, 10))
+        Tooltip(self.advanced_button, tr("How the manuscript is split, how the checks are run, and the standing "
+                                         "instructions and protected terms sent with every request."))
+        self.advanced = ttk.Frame(body)
+        self.advanced.columnconfigure(0, weight=1)
+        advanced = self.advanced
+
+        options = self._card(advanced, tr("3. Splitting and evaluation"))
+        options.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         grid = ttk.Frame(options, style="Surface.TFrame")
         grid.pack(fill=tk.X)
         grid.columnconfigure(1, weight=1)
@@ -1317,8 +1366,8 @@ class StartView(ttk.Frame):
                      width=14).pack(side=tk.LEFT)
 
         # --- author's instructions and protected terms
-        guide = self._card(body, tr("4. Author's instructions"), tr(STYLE_GUIDE_HINT))
-        guide.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        guide = self._card(advanced, tr("4. Author's instructions"), tr(STYLE_GUIDE_HINT))
+        guide.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         self.style_guide_box = StyleGuideBox(guide, height=4)
         self.style_guide_box.pack(fill=tk.X)
         ttk.Label(guide, text=tr("Protected terms"), style="CardTitle.TLabel").pack(anchor="w", pady=(12, 0))
@@ -1335,9 +1384,24 @@ class StartView(ttk.Frame):
         ttk.Button(actions, text=tr("Open existing project..."), command=self.open_existing).pack(side=tk.LEFT, padx=8)
         self.estimate_var = tk.StringVar(value="")
         ttk.Label(actions, textvariable=self.estimate_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=12)
+        self.host = None  # set by refresh_defaults; answers average_request_seconds() for the estimate
+        self._label_advanced()
+
+    def _label_advanced(self):
+        glyph = "▾" if self.advanced_shown else "▸"
+        self.advanced_button.configure(text="{0} {1}".format(glyph, tr("Advanced options")))
+
+    def _toggle_advanced(self):
+        self.advanced_shown = not self.advanced_shown
+        if self.advanced_shown:
+            self.advanced.grid(row=3, column=0, sticky="ew")
+        else:
+            self.advanced.grid_remove()
+        self._label_advanced()
 
     def refresh_defaults(self, host):
         """Suggest a parallelism that suits the backend and pre-fill the author's instructions."""
+        self.host = host
         try:
             self.parallel_var.set("1" if host.backend_id() == "ollama" else "2")
         except Exception:
@@ -1437,7 +1501,14 @@ class StartView(ttk.Frame):
             requests = segments
         else:
             requests = segments * checks * (2 if options.explain else 1)
-        self.estimate_var.set(tr("≈ {requests} model requests", requests=requests) if checks else tr("No check enabled"))
+        self.estimate_var.set(estimate_text(requests, self._average_request_seconds(), options.parallelism) if checks
+                              else tr("No check enabled"))
+
+    def _average_request_seconds(self):
+        try:
+            return self.host.average_request_seconds() if self.host is not None else None
+        except Exception:
+            return None
 
     def start(self):
         if not self.path:
@@ -1474,12 +1545,14 @@ class AuthorFixDialog(tk.Toplevel):
         frame.pack(fill=tk.BOTH, expand=True)
         frame.columnconfigure(0, weight=1)
         ttk.Label(frame, text=tr("Selected text:"), style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(frame, text=original.replace("\n", "↵") or "∅", wraplength=520, justify=tk.LEFT,
-                  font=font(10, "bold")).grid(row=1, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(frame, text=original.replace("\n", " ¶ ") or tr("(nothing)"), wraplength=520, justify=tk.LEFT,
+                  font=font(11, serif=True)).grid(row=1, column=0, sticky="w", pady=(0, 8))
         ttk.Label(frame, text=tr("Replace it with:"), style="Muted.TLabel").grid(row=2, column=0, sticky="w")
-        self.var = tk.StringVar(value=original)
-        self.entry = ttk.Entry(frame, textvariable=self.var, width=70)
-        self.entry.grid(row=3, column=0, sticky="ew", pady=(2, 10))
+        self.text = tk.Text(frame, width=70, undo=True, height=min(6, max(2, original.count("\n") + len(original) // 70 + 1)))
+        style_text(self.text, size=11, serif=True)
+        self.text.configure(padx=8, pady=6)
+        self.text.insert("1.0", original)
+        self.text.grid(row=3, column=0, sticky="ew", pady=(2, 10))
         ttk.Label(frame, text=tr("Leave it empty to delete the selected text. The correction is applied with top "
                              "priority and counts as accepted; Alt+Z removes it again."),
                   style="Muted.TLabel", wraplength=520, justify=tk.LEFT).grid(row=4, column=0, sticky="w")
@@ -1487,24 +1560,31 @@ class AuthorFixDialog(tk.Toplevel):
         buttons.grid(row=5, column=0, sticky="e", pady=(12, 0))
         ttk.Button(buttons, text=tr("Cancel"), style="Ghost.TButton", command=self.destroy).pack(side=tk.RIGHT)
         ttk.Button(buttons, text=tr("Add correction"), style="Accent.TButton", command=self.save).pack(side=tk.RIGHT, padx=(0, 6))
-        self.bind("<Return>", lambda event: self.save())
+        ttk.Label(buttons, text=tr("Ctrl+Enter"), style="Kbd.TLabel").pack(side=tk.RIGHT, padx=(0, 6))
+        self.text.bind("<Control-Return>", lambda event: self.save() or "break")
         self.bind("<Escape>", lambda event: self.destroy())
-        self.entry.focus_set()
-        self.entry.selection_range(0, tk.END)
+        self.text.focus_set()
+        self.text.tag_add("sel", "1.0", "end-1c")
         self.grab_set()
 
     def save(self):
-        text = self.var.get()
+        text = self.text.get("1.0", "end-1c")
         self.destroy()
         self.on_save(text)
 
 
+def short_term(text, limit=24):
+    """A protected term for a button label: one line, cut with an ellipsis."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 class ChangeCard(ttk.Frame):
-    """One proposed change with explanation and accept/reject buttons."""
+    """One proposed change: a colour stripe for its check, the diff in serif, the reason, and the decision buttons."""
 
     def __init__(self, parent, change, segment_text, state, on_select, on_decide, on_add_to_glossary=None,
                  on_edit=None):
-        super().__init__(parent, style="Card.TFrame", padding=(10, 8), takefocus=1)
+        super().__init__(parent, style="Card.TFrame", padding=0, takefocus=1)
         self.change = change
         self.on_select = on_select
         self.on_decide = on_decide
@@ -1512,8 +1592,13 @@ class ChangeCard(ttk.Frame):
         self.on_edit = on_edit
         self.editor = None
         self.selected = False
+        self.stripe = tk.Frame(self, width=5, background=CHECK_COLORS.get(change.check, (PALETTE["border_strong"],))[0])
+        self.stripe.pack(side=tk.LEFT, fill=tk.Y)
+        self.body = ttk.Frame(self, style="Surface.TFrame", padding=(10, 8, 10, 8))
+        self.body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        body = self.body
 
-        top = ttk.Frame(self, style="Surface.TFrame")
+        top = ttk.Frame(body, style="Surface.TFrame")
         top.pack(fill=tk.X)
         self.badge = ttk.Label(top, text=check_label(change.check), style="{0}.Badge.TLabel".format(change.check.title()))
         self.badge.pack(side=tk.LEFT)
@@ -1524,46 +1609,62 @@ class ChangeCard(ttk.Frame):
         self.edited_tag = ttk.Label(top, text="{0} {1}".format(DECISION_GLYPHS["edited"], tr("edited")), style="Kind.Badge.TLabel")
         if change.edited:
             self.edited_tag.pack(side=tk.LEFT, padx=(0, 8))
-            Tooltip(self.edited_tag, tr("The model proposed: {text}", text=change.model_proposed_text or "∅"))
+            Tooltip(self.edited_tag, tr("The model proposed: {text}", text=change.model_proposed_text or tr("(nothing)")))
         self.flag_badge = None
         if change.flagged:
             # Hallucination guard: the reason ids explain themselves in the tooltip.
-            self.flag_badge = ttk.Label(top, text="\u26a0 " + tr("check this"), style="Flag.Badge.TLabel")
+            self.flag_badge = ttk.Label(top, text=STATUS_GLYPHS["flagged"] + " " + tr("check this"),
+                                        style="Flag.Badge.TLabel")
             self.flag_badge.pack(side=tk.LEFT, padx=(0, 8))
             Tooltip(self.flag_badge, flag_tooltip(change))
-        self.glossary_link = None
-        if on_add_to_glossary is not None and change.original_text.strip() and not change.is_author:
-            # A link-styled button (reachable with Tab): reject this change and protect the original wording.
-            self.glossary_link = ttk.Button(top, text=tr("Add to glossary"), style="Link.TButton",
-                                            command=self._add_to_glossary)
-            self.glossary_link.pack(side=tk.LEFT, padx=(4, 0))
-        self.reject_button = ttk.Button(top, text=tr("Reject"), style="Small.Danger.TButton",
-                                        command=lambda: self.on_decide(self.change, REJECTED))
-        self.reject_button.pack(side=tk.RIGHT)
-        self.accept_button = ttk.Button(top, text=tr("Accept"), style="Small.Success.TButton",
-                                        command=lambda: self.on_decide(self.change, ACCEPTED))
-        self.accept_button.pack(side=tk.RIGHT, padx=(0, 6))
-        self.edit_button = None
-        if on_edit is not None:
-            self.edit_button = ttk.Button(top, text=tr("Edit…"), style="Small.TButton", command=self.begin_edit)
-            self.edit_button.pack(side=tk.RIGHT, padx=(0, 6))
-            Tooltip(self.edit_button, tr("Reword this suggestion before accepting it (F2 on the selected card)."))
 
-        self.diff = tk.Text(self, height=2, cursor="arrow")
-        style_text(self.diff, size=10)
-        self.diff.configure(padx=6, pady=4, highlightthickness=0, spacing1=0, spacing3=0)
+        self.diff = tk.Text(body, height=2, cursor="arrow")
+        style_text(self.diff, size=11, serif=True)
+        self.diff.configure(padx=4, pady=4, highlightthickness=0, spacing1=0, spacing3=0)
         self.diff.tag_configure("context", foreground=PALETTE["muted"])
         self.diff.tag_configure("removed", foreground=PALETTE["danger"], background=PALETTE["danger_soft"], overstrike=True)
         self.diff.tag_configure("added", foreground=PALETTE["success"], background=PALETTE["success_soft"], underline=True)
-        self.diff.tag_configure("arrow", foreground=PALETTE["faint"])
+        self.diff.tag_configure("arrow", foreground=PALETTE["faint"], font=font(10))  # the serif has no arrow glyph
         self._render_diff(segment_text)
-        self.diff.pack(fill=tk.X, pady=(6, 4))
+        self.diff.pack(fill=tk.X, pady=(6, 2))
 
-        self.explanation = ttk.Label(self, text=explanation_text(change), style="Explanation.TLabel",
+        self.explanation = ttk.Label(body, text=explanation_text(change), style="Explanation.TLabel",
                                      wraplength=520, justify=tk.LEFT)
         self.explanation.pack(anchor="w")
 
-        for widget in (self, top, self.badge, self.state_label, self.diff, self.explanation):
+        foot = ttk.Frame(body, style="Surface.TFrame")
+        foot.pack(fill=tk.X, pady=(6, 0))
+        self.glossary_link = None
+        if on_add_to_glossary is not None and change.original_text.strip() and not change.is_author:
+            # A link-styled button (reachable with Tab): reject this change and protect the original wording.
+            self.glossary_link = ttk.Button(foot, text=tr("Keep “{term}” as written",
+                                                          term=short_term(change.original_text)),
+                                            style="Link.TButton", command=self._add_to_glossary)
+            self.glossary_link.pack(side=tk.LEFT)
+            Tooltip(self.glossary_link, tr("Reject this change and add “{term}” to the protected terms, so no "
+                                           "later check touches it (Alt+Z undoes both).",
+                                           term=short_term(change.original_text, 60)))
+        self.accept_button = ttk.Button(foot, text=tr("Accept"), style="Small.Fill.Success.TButton",
+                                        command=lambda: self.on_decide(self.change, ACCEPTED))
+        self.accept_kbd = ttk.Label(foot, text="Alt+A", style="Surface.Kbd.TLabel")
+        self.reject_button = ttk.Button(foot, text=tr("Reject"), style="Small.Danger.TButton",
+                                        command=lambda: self.on_decide(self.change, REJECTED))
+        self.reject_kbd = ttk.Label(foot, text="Alt+R", style="Surface.Kbd.TLabel")
+        self.accept_kbd.pack(side=tk.RIGHT, padx=(6, 0))
+        self.accept_button.pack(side=tk.RIGHT)
+        self.reject_kbd.pack(side=tk.RIGHT, padx=(6, 10))
+        self.reject_button.pack(side=tk.RIGHT)
+        self.edit_button = None
+        self.edit_kbd = None
+        if on_edit is not None:
+            self.edit_kbd = ttk.Label(foot, text="F2", style="Surface.Kbd.TLabel")
+            self.edit_kbd.pack(side=tk.RIGHT, padx=(6, 10))
+            self.edit_button = ttk.Button(foot, text=tr("Edit…"), style="Small.Surface.Ghost.TButton",
+                                          command=self.begin_edit)
+            self.edit_button.pack(side=tk.RIGHT)
+            Tooltip(self.edit_button, tr("Reword this suggestion before accepting it (F2 on the selected card)."))
+
+        for widget in (self, body, top, foot, self.badge, self.state_label, self.diff, self.explanation, self.stripe):
             widget.bind("<Button-1>", self._clicked, add="+")
         self.bind("<FocusIn>", self._focused)  # Tab reaches the card; Alt+A / Alt+R then act on it
         self.refresh(state)
@@ -1606,29 +1707,35 @@ class ChangeCard(ttk.Frame):
 
     # ---- inline editing of the proposed text
     def begin_edit(self):
-        """Show an entry with the proposed text; Enter saves through on_edit, Escape cancels."""
+        """Show a small text box with the proposed text; Ctrl+Enter saves through on_edit, Escape cancels."""
         if self.on_edit is None:
             return
         self.on_select(self.change)
         if self.editor is not None and self.editor.winfo_exists():
-            self.edit_entry.focus_set()
+            self.edit_text.focus_set()
             return
-        self.editor = ttk.Frame(self, style="Selected.TFrame" if self.selected else "Surface.TFrame")
+        self.editor = ttk.Frame(self.body, style="Selected.TFrame" if self.selected else "Surface.TFrame")
         self.editor.pack(fill=tk.X, pady=(2, 4), after=self.diff)
-        self.edit_var = tk.StringVar(value=self.change.proposed_text)
-        self.edit_entry = ttk.Entry(self.editor, textvariable=self.edit_var)
-        self.edit_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(self.editor, text=tr("Save"), style="Small.Success.TButton", command=self._save_edit).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(self.editor, text=tr("Cancel"), style="Small.TButton", command=self.cancel_edit).pack(side=tk.LEFT, padx=(4, 0))
-        self.edit_entry.bind("<Return>", lambda event: self._save_edit())
-        self.edit_entry.bind("<Escape>", lambda event: self.cancel_edit())
-        self.edit_entry.focus_set()
-        self.edit_entry.selection_range(0, tk.END)
+        proposed = self.change.proposed_text
+        self.edit_text = tk.Text(self.editor, undo=True, height=min(4, max(2, proposed.count("\n") + len(proposed) // 70 + 1)))
+        style_text(self.edit_text, size=11, serif=True)
+        self.edit_text.configure(padx=6, pady=4)
+        self.edit_text.insert("1.0", proposed)
+        self.edit_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        side = ttk.Frame(self.editor, style="Selected.TFrame" if self.selected else "Surface.TFrame")
+        side.pack(side=tk.LEFT, padx=(6, 0), fill=tk.Y)
+        ttk.Button(side, text=tr("Save"), style="Small.Fill.Success.TButton", command=self._save_edit).pack(fill=tk.X)
+        ttk.Button(side, text=tr("Cancel"), style="Small.TButton", command=self.cancel_edit).pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(side, text=tr("Ctrl+Enter saves"), style="Selected.Kbd.TLabel" if self.selected else "Surface.Kbd.TLabel").pack(pady=(4, 0))
+        self.edit_text.bind("<Control-Return>", lambda event: self._save_edit() or "break")
+        self.edit_text.bind("<Escape>", lambda event: self.cancel_edit())
+        self.edit_text.focus_set()
+        self.edit_text.tag_add("sel", "1.0", "end-1c")
 
     def _save_edit(self):
         if self.editor is None:
             return
-        text = self.edit_var.get()
+        text = self.edit_text.get("1.0", "end-1c")
         self.cancel_edit()
         self.on_edit(self.change, text)
 
@@ -1650,9 +1757,27 @@ class ChangeCard(ttk.Frame):
         surface = PALETTE["selection"] if self.selected else PALETTE["surface"]
         self.diff.configure(background=surface)
         self.explanation.configure(style="SelectedExplanation.TLabel" if self.selected else "Explanation.TLabel")
-        for child in self.winfo_children():
+        frame_style = "Selected.TFrame" if self.selected else "Surface.TFrame"
+        kbd_style = "Selected.Kbd.TLabel" if self.selected else "Surface.Kbd.TLabel"
+        self.body.configure(style=frame_style)
+        for child in self.body.winfo_children():
             if isinstance(child, ttk.Frame):
-                child.configure(style="Selected.TFrame" if self.selected else "Surface.TFrame")
+                child.configure(style=frame_style)
+                for grandchild in child.winfo_children():
+                    if isinstance(grandchild, ttk.Frame):
+                        grandchild.configure(style=frame_style)
+        # the shortcuts are printed on the selected card only: that is the one they act on
+        for label, after, pad in ((self.accept_kbd, self.accept_button, (6, 0)), (self.reject_kbd, self.reject_button, (6, 10)),
+                                  (self.edit_kbd, self.edit_button, (6, 10))):
+            if label is None:
+                continue
+            if self.selected:
+                label.configure(style=kbd_style)
+                label.pack(side=tk.RIGHT, padx=pad, before=after)
+            else:
+                label.pack_forget()
+        if self.glossary_link is not None:
+            self.glossary_link.configure(style="Selected.Link.TButton" if self.selected else "Link.TButton")
         self.accept_button.configure(state=tk.DISABLED if self.change.decision == ACCEPTED else tk.NORMAL)
         self.reject_button.configure(state=tk.DISABLED if self.change.decision == REJECTED else tk.NORMAL)
 
@@ -1692,13 +1817,13 @@ class ProjectView(ttk.Frame):
 
     def restyle(self):
         """Re-apply palette colours to the text areas and tree tags after a theme change."""
-        style_text(self.text, size=11, readonly=True)
-        style_text(self.chapter_text, size=11, readonly=True)
+        style_text(self.text, size=12, readonly=True, serif=True)
+        style_text(self.chapter_text, size=12, readonly=True, serif=True)
         self._configure_tags()
         for status, color in STATUS_COLORS.items():
             self.tree.tag_configure(status, foreground=color)
-        self.tree.column("#0", width=scaled(200))
-        self.tree.column("status", width=scaled(170))
+        self.tree.column("#0", width=scaled(210))
+        self.tree.column("status", width=scaled(96))
         self.after_idle(self._place_sash)
         self.list_tree.tag_configure("flagged", foreground=PALETTE["warning"])
         self.consistency_tree.tag_configure(STATUS_ISSUE, foreground=PALETTE["danger"])
@@ -1710,10 +1835,19 @@ class ProjectView(ttk.Frame):
             self.render_segment()
             self.schedule_chapter_render()
 
+    def _fit_summary(self):
+        """Wrap the summary line in the room left of the header buttons instead of running under them."""
+        try:
+            width = self.header.winfo_width() - self.header_buttons.winfo_width() - 24
+        except tk.TclError:
+            return
+        if width > 50:
+            self.summary_label.configure(wraplength=max(200, width))
+
     def _place_sash(self):
         """Give the tree enough room for both columns at the current scale."""
         try:
-            self.paned.sashpos(0, scaled(340))
+            self.paned.sashpos(0, scaled(300))
         except tk.TclError:
             pass
 
@@ -1745,29 +1879,30 @@ class ProjectView(ttk.Frame):
 
         header = ttk.Frame(self)
         header.grid(row=0, column=0, sticky="ew")
-        header.columnconfigure(1, weight=1)
+        header.columnconfigure(0, weight=1)
         self.title_var = tk.StringVar(value="")
         ttk.Label(header, textvariable=self.title_var, style="Title.TLabel").grid(row=0, column=0, sticky="w")
         self.summary_var = tk.StringVar(value="")
-        ttk.Label(header, textvariable=self.summary_var, style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="w")
+        self.summary_label = ttk.Label(header, textvariable=self.summary_var, style="Muted.TLabel", justify=tk.LEFT)
+        self.summary_label.grid(row=1, column=0, sticky="w")
         buttons = ttk.Frame(header)
-        buttons.grid(row=0, column=2, rowspan=2, sticky="e")
+        buttons.grid(row=0, column=1, rowspan=2, sticky="ne")
+        self.header, self.header_buttons = header, buttons
+        header.bind("<Configure>", lambda event: self._fit_summary())
+        buttons.bind("<Configure>", lambda event: self._fit_summary())  # the Pause button changes its text
+        self.summary_var.trace_add("write", lambda *args: self.after(60, self._fit_summary))
         self.pause_button = ttk.Button(buttons, text=tr("Pause"), command=self.on_pause)
         self.pause_button.pack(side=tk.LEFT)
-        ttk.Button(buttons, text=tr("Options..."), command=self.on_options).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(buttons, text=tr("Decisions..."), command=lambda: self.master.show_decisions()).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(buttons, text=tr("Statistics..."), command=lambda: self.master.show_statistics()).pack(side=tk.LEFT, padx=(6, 0))
-        self.consistency_button = ttk.Button(buttons, text=tr("Consistency..."), command=lambda: self.master.run_consistency())
-        self.consistency_button.pack(side=tk.LEFT, padx=(6, 0))
-        Tooltip(self.consistency_button, tr("Look for names spelled two ways, hyphenation and number-style variants, "
-                                         "mixed quotation marks and POV/tense drift across chapters. Available once "
-                                         "every segment has been evaluated."))
-        check_source = ttk.Button(buttons, text=tr("Check source"), command=lambda: self.master.check_source())
-        check_source.pack(side=tk.LEFT, padx=(6, 0))
-        Tooltip(check_source, tr("Compare the manuscript file with this project and re-sync when it changed: "
-                              "unchanged segments keep their results and decisions."))
+        # Everything that is not part of the daily loop lives in one menu.
+        self.more_button = ttk.Menubutton(buttons, text=tr("More"))
+        self.more_menu = tk.Menu(self.more_button, tearoff=False, postcommand=self._fill_more_menu)
+        self.more_button.configure(menu=self.more_menu)
+        self.more_button.pack(side=tk.LEFT, padx=(6, 0))
+        Tooltip(self.more_button, tr("Review options, the decision log, statistics, the consistency check and the "
+                                     "manuscript file."))
         ttk.Button(buttons, text=tr("Export..."), style="Accent.TButton", command=self.on_export).pack(side=tk.LEFT, padx=6)
         ttk.Button(buttons, text=tr("Close project"), style="Ghost.TButton", command=self.on_close).pack(side=tk.LEFT)
+        self._consistency_ready = False
 
         progress_row = ttk.Frame(self)
         progress_row.grid(row=1, column=0, sticky="ew", pady=(8, 8))
@@ -1782,7 +1917,7 @@ class ProjectView(ttk.Frame):
         Tooltip(thinking, tr("Watch the model's reasoning for every running request (View menu, Ctrl+Shift+T)."))
 
         checks_row = ttk.Frame(progress_row)
-        checks_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        checks_row.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
         ttk.Label(checks_row, text=tr("Checks:"), style="Muted.TLabel").pack(side=tk.LEFT)
         self.check_vars = {}
         self.check_buttons = {}
@@ -1796,15 +1931,12 @@ class ProjectView(ttk.Frame):
         for check in CHECKS:
             ttk.Checkbutton(checks_row, text=check_label(check), variable=self.filter_vars[check],
                             command=self.render_segment).pack(side=tk.LEFT, padx=(8, 0))
-        self.kinds_button = ttk.Menubutton(checks_row, text=tr("Kinds") + " \u25be", style="Small.TMenubutton")
+        self.kinds_button = ttk.Menubutton(checks_row, text=tr("Kinds"), style="Small.TMenubutton")
         self.kinds_menu = tk.Menu(self.kinds_button, tearoff=False, postcommand=self._fill_kinds_menu)
         self.kinds_button.configure(menu=self.kinds_menu)
         self.kinds_button.pack(side=tk.LEFT, padx=(12, 0))
         Tooltip(self.kinds_button, tr("Hide kinds of edits from the review, or accept/reject every pending "
                                    "change of one kind across the project (Alt+Z reverts)."))
-        self.hint_var = tk.StringVar(value=tr("Alt+A accept · Alt+R reject · Alt+Z undo · F2 edit · Ctrl+E my correction · "
-                                           "Alt+↑/↓ change · Alt+←/→ segment"))
-        ttk.Label(checks_row, textvariable=self.hint_var, style="Muted.TLabel", font=font(9)).pack(side=tk.RIGHT)
 
         paned = self.paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         paned.grid(row=2, column=0, sticky="nsew")
@@ -1813,16 +1945,18 @@ class ProjectView(ttk.Frame):
         paned.add(left, weight=1)
         self.tree = ttk.Treeview(left, columns=("status",), show="tree headings", selectmode="browse")
         self.tree.heading("#0", text=tr("Chapters and segments"), anchor="w")
-        self.tree.heading("status", text=tr("Status"), anchor="w")
-        self.tree.column("#0", width=200, stretch=True)
-        self.tree.column("status", width=170, stretch=False)
+        self.tree.heading("status", text=tr("Open"), anchor="w")
+        self.tree.column("#0", width=210, stretch=True)
+        self.tree.column("status", width=96, stretch=False)
         tree_scroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=tree_scroll.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         for status, color in STATUS_COLORS.items():
             self.tree.tag_configure(status, foreground=color)
-        self.tree.tag_configure("chapter", font=font(10, "bold"))
+        self.tree.tag_configure("chapter", font=font(11, serif=True))
+        self.tree_tips = {}  # row iid -> the full status sentence, shown as a tooltip
+        self.tree_tooltip = RowTooltip(self.tree, self.tree_tips)
         self.tree.bind("<<TreeviewSelect>>", self._tree_selected)
         self.tree_menu = tk.Menu(self.tree, tearoff=False)
         self.tree.bind("<Button-3>", self._tree_context)
@@ -1844,11 +1978,11 @@ class ProjectView(ttk.Frame):
         self.notebook.add(self.consistency_tab, text=tr("Consistency"))
         self.notebook.bind("<<NotebookTabChanged>>", self._tab_changed)
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(1, weight=2)
-        right.rowconfigure(3, weight=3)
+        right.rowconfigure(1, weight=1)
+        right.rowconfigure(4, weight=2)
 
         seg_header = ttk.Frame(right)
-        seg_header.grid(row=0, column=0, sticky="ew", padx=(10, 0))
+        seg_header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=(10, 0))
         self.segment_var = tk.StringVar(value=tr("Select a segment"))
         ttk.Label(seg_header, textvariable=self.segment_var, style="TLabel", font=font(11, "bold")).pack(side=tk.LEFT)
         self.segment_status = ttk.Label(seg_header, text="", style="Status.TLabel")
@@ -1860,36 +1994,43 @@ class ProjectView(ttk.Frame):
         Tooltip(self.reevaluate_button, tr("Discard this segment's results and decisions and run the enabled checks "
                                         "on it again. Right-click a row in the tree for one check or a whole chapter."))
 
-        self.text = tk.Text(right, height=9)
-        style_text(self.text, size=11, readonly=True)
+        self.text = tk.Text(right, height=7)
+        style_text(self.text, size=12, readonly=True, serif=True)
         self.text.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=(4, 6))
+        text_scroll = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.text.yview)
+        text_scroll.grid(row=1, column=1, sticky="ns", pady=(4, 6))
+        self.text.configure(yscrollcommand=text_scroll.set)
         self._configure_tags()  # both text areas exist now
         self.text_menu = tk.Menu(self.text, tearoff=False, postcommand=self._fill_text_menu)
         self.text.bind("<Button-3>", self._text_context)
         self.text.bind("<Button-2>", self._text_context)
 
         actions = ttk.Frame(right)
-        actions.grid(row=2, column=0, sticky="ew", padx=(10, 0), pady=(0, 4))
-        ttk.Button(actions, text="\u25c0 " + tr("Previous"), style="Small.TButton",
+        actions.grid(row=2, column=0, columnspan=2, sticky="ew", padx=(10, 0), pady=(0, 2))
+        ttk.Button(actions, text="‹ " + tr("Previous"), style="Small.Ghost.TButton",
                    command=lambda: self.step_segment(-1)).pack(side=tk.LEFT)
-        ttk.Button(actions, text=tr("Next") + " \u25b6", style="Small.TButton",
-                   command=lambda: self.step_segment(1)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(actions, text=tr("Next") + " ›", style="Small.Ghost.TButton",
+                   command=lambda: self.step_segment(1)).pack(side=tk.LEFT, padx=(2, 8))
         ttk.Button(actions, text=tr("Next to review"), style="Small.TButton",
-                   command=self.jump_to_next_pending).pack(side=tk.LEFT, padx=(8, 0))
+                   command=self.jump_to_next_pending).pack(side=tk.LEFT)
+        self.undo_button = ttk.Button(actions, text=tr("Undo"), style="Small.Ghost.TButton", command=lambda: self.master.undo())
+        self.undo_button.pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(actions, text="Alt+Z", style="Kbd.TLabel").pack(side=tk.LEFT, padx=(4, 0))
+        Tooltip(self.undo_button, tr("Revert the last accept/reject (a bulk action is reverted as a whole). Alt+Z"))
         ttk.Button(actions, text=tr("Reject all shown"), style="Small.Danger.TButton",
                    command=lambda: self.decide_all(REJECTED)).pack(side=tk.RIGHT)
         ttk.Button(actions, text=tr("Accept all shown"), style="Small.Success.TButton",
                    command=lambda: self.decide_all(ACCEPTED)).pack(side=tk.RIGHT, padx=(0, 6))
-        self.undo_button = ttk.Button(actions, text=tr("Undo"), style="Small.TButton", command=lambda: self.master.undo())
-        self.undo_button.pack(side=tk.RIGHT, padx=(0, 6))
-        Tooltip(self.undo_button, tr("Revert the last accept/reject (a bulk action is reverted as a whole). Alt+Z"))
-        self.reject_flagged_button = ttk.Button(actions, text=tr("Reject flagged") + " \u26a0", style="Small.TButton",
-                                                command=self.reject_flagged)
-        self.reject_flagged_button.pack(side=tk.RIGHT, padx=(0, 6))
+        self.reject_flagged_button = ttk.Button(actions, text=tr("Reject flagged") + " " + STATUS_GLYPHS["flagged"],
+                                                style="Small.TButton", command=self.reject_flagged)
+        Tooltip(self.reject_flagged_button, tr("Reject every shown change the hallucination guard flagged (Alt+Z reverts)."))
         self.retry_button = ttk.Button(actions, text=tr("Retry failed"), style="Small.TButton", command=self.on_retry)
+        hint = ttk.Label(right, text=tr("Alt+←/→ segment · Alt+↑/↓ change · F2 reword "
+                                        "· Ctrl+E my own correction · F1 every shortcut"), style="Kbd.TLabel")
+        hint.grid(row=3, column=0, columnspan=2, sticky="w", padx=(12, 0), pady=(0, 4))
 
         self.cards_frame = ScrollableFrame(right)
-        self.cards_frame.grid(row=3, column=0, sticky="nsew", padx=(10, 0))
+        self.cards_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=(10, 0))
 
     def _build_chapter_tab(self):
         """Read-only rendering of the whole chapter with one tag per change state."""
@@ -1916,7 +2057,7 @@ class ProjectView(ttk.Frame):
         Tooltip(legend, tr("Click a highlighted passage to open its change in the Segment tab; "
                         "Alt+A / Alt+R then decide on it."))
         self.chapter_text = tk.Text(tab, height=20)
-        style_text(self.chapter_text, size=11, readonly=True)
+        style_text(self.chapter_text, size=12, readonly=True, serif=True)
         self.chapter_text.grid(row=2, column=0, sticky="nsew", padx=(10, 0))
         scroll = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=self.chapter_text.yview)
         scroll.grid(row=2, column=1, sticky="ns")
@@ -2269,7 +2410,7 @@ class ProjectView(ttk.Frame):
                 chapter.title, segment.index, check_label(change.check), kind_label(change.kind),
                 "{0} → {1}{2}".format(_one_line(change.original_text) or "∅",
                                           _one_line(change.proposed_text) or "∅",
-                                          "  ⚠" if change.flagged else ""),
+                                          "  " + STATUS_GLYPHS["flagged"] if change.flagged else ""),
             ))
             self.listed[iid] = (chapter.index, segment.index, change.change_id)
         shown = len(self.listed)
@@ -2319,6 +2460,7 @@ class ProjectView(ttk.Frame):
         for kind in CHANGE_KINDS:
             self.kind_vars[kind].set(kind not in project.options.hidden_kinds)
         self.tree.delete(*self.tree.get_children())
+        self.tree_tips.clear()
         for chapter in project.chapters:
             chapter_id = "c{0}".format(chapter.index)
             self.tree.insert("", tk.END, iid=chapter_id, text="{0}. {1}".format(chapter.index, chapter.title),
@@ -2419,12 +2561,22 @@ class ProjectView(ttk.Frame):
             self.retry_button.pack(side=tk.LEFT, padx=(8, 0))
         else:
             self.retry_button.pack_forget()
-        self.consistency_button.configure(
-            state=tk.NORMAL if not self.running and not self.project.pending_tasks() else tk.DISABLED)
+        self._consistency_ready = not self.running and not self.project.pending_tasks()
         if self.current:
             self.render_segment()
         self.schedule_chapter_render()
         self.schedule_list_refresh()
+
+    def _fill_more_menu(self):
+        menu = self.more_menu
+        menu.delete(0, tk.END)
+        menu.add_command(label=tr("Review options..."), command=self.on_options)
+        menu.add_command(label=tr("Decisions..."), command=lambda: self.master.show_decisions())
+        menu.add_command(label=tr("Statistics..."), command=lambda: self.master.show_statistics())
+        menu.add_separator()
+        menu.add_command(label=tr("Consistency check..."), command=lambda: self.master.run_consistency(),
+                         state=tk.NORMAL if self._consistency_ready else tk.DISABLED)
+        menu.add_command(label=tr("Check the manuscript file..."), command=lambda: self.master.check_source())
 
     def _segment_status(self, chapter, segment):
         status = segment.status(self.project.enabled)
@@ -2433,6 +2585,7 @@ class ProjectView(ttk.Frame):
         return status
 
     def _refresh_tree_row(self, chapter, segment):
+        """The tree shows a mark and a short count per segment; the full sentence goes into the row's tooltip."""
         status = self._segment_status(chapter, segment)
         iid = self._segment_iid(chapter.index, segment.index)
         changes = segment.changes(self.project.enabled)
@@ -2442,10 +2595,32 @@ class ProjectView(ttk.Frame):
             detail = tr("{pending} pending", pending=pending)
         elif status == STATUS_REVIEWED:
             detail = tr("{count} changes", count=len(changes))
-        label = status_text(status, detail)
+        sentence = status_text(status, detail)
+        label = status_short(status, pending, len(changes))
         if any(change.flagged and change.decision == PENDING for change in changes):
             label = STATUS_GLYPHS["flagged"] + " " + label  # pending changes the hallucination guard flagged
+            sentence = tr("{status} · some of them flagged by the hallucination guard", status=sentence)
         self.tree.item(iid, values=(label,), tags=(status,))
+        self.tree_tips[iid] = sentence
+        self._refresh_chapter_row(chapter)
+
+    def _refresh_chapter_row(self, chapter):
+        """A chapter row sums up its segments: how many changes are open, or that it is done."""
+        statuses = [self._segment_status(chapter, segment) for segment in chapter.segments]
+        pending = sum(1 for segment in chapter.segments for change in segment.changes(self.project.enabled)
+                      if change.decision == PENDING)
+        if pending:
+            label = tr("{pending} open", pending=pending)
+        elif statuses and all(status in (STATUS_REVIEWED, STATUS_CLEAN) for status in statuses):
+            label = tr("done")
+        elif any(status == STATUS_ERROR for status in statuses):
+            label = tr("error")
+        else:
+            label = ""
+        iid = "c{0}".format(chapter.index)
+        self.tree.item(iid, values=(label,))
+        self.tree_tips[iid] = tr("{title}: {segments} segments, {pending} changes waiting for a decision. Click to "
+                                 "open the first one.", title=chapter.title, segments=len(chapter.segments), pending=pending)
 
     def segment_updated(self, chapter_index, segment_index):
         chapter, segment = self.project.find(chapter_index, segment_index)
@@ -2556,7 +2731,7 @@ class ProjectView(ttk.Frame):
             return
         hidden = [k for k in CHANGE_KINDS if not self.kind_vars[k].get()]
         self.project.options.hidden_kinds = hidden
-        self.kinds_button.configure(text=(tr("Kinds") if not hidden else tr("Kinds ({count} hidden)", count=len(hidden))) + " \u25be")
+        self.kinds_button.configure(text=tr("Kinds") if not hidden else tr("Kinds ({count} hidden)", count=len(hidden)))
         self.master.schedule_save()
         self.render_segment()
 
@@ -2600,6 +2775,15 @@ class ProjectView(ttk.Frame):
                 # selection_set(): re-rendering would drop the selected change.
                 return
             self.select_segment(chapter_index, segment_index, from_tree=True)
+        elif iid.startswith("c") and self.project is not None:
+            # A chapter row opens its first segment that still waits for a decision (or its first segment).
+            chapter = next((c for c in self.project.chapters if c.index == int(iid[1:])), None)
+            if chapter is None or not chapter.segments:
+                return
+            target = next((segment for segment in chapter.segments
+                           if self._segment_status(chapter, segment) == STATUS_READY), chapter.segments[0])
+            if (chapter.index, target.index) != self.current:
+                self.select_segment(chapter.index, target.index)
 
     def select_segment(self, chapter_index, segment_index, from_tree=False, change_id=None):
         self.current = (chapter_index, segment_index)
@@ -2672,9 +2856,10 @@ class ProjectView(ttk.Frame):
                     self.text.see(start)
         self.text.configure(state=tk.DISABLED)
 
-        self.reject_flagged_button.configure(
-            state=tk.NORMAL if any(c.flagged and c.decision == PENDING for c in changes) else tk.DISABLED
-        )
+        if any(c.flagged and c.decision == PENDING for c in changes):
+            self.reject_flagged_button.pack(side=tk.RIGHT, padx=(0, 10))
+        else:
+            self.reject_flagged_button.pack_forget()
 
         # --- cards
         self.cards_frame.clear()

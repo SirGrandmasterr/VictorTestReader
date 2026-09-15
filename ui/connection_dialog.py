@@ -3,25 +3,24 @@
 import copy
 import threading
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, ttk
 
 from core.remote_service import RemoteService, normalise_api_key
 from core.secrets import INSTALL_HINT, keyring_available
-from core.settings import BACKEND_LABELS, BACKEND_OLLAMA, BACKEND_REMOTE, UI_LANGUAGES
-from .i18n import LANGUAGE_LABELS, tr
+from core.settings import BACKEND_LABELS, BACKEND_OLLAMA, BACKEND_REMOTE
+from .dialogs import ask_name
+from .i18n import tr
 from .theme import PALETTE, style_text
 
 
 class ConnectionDialog(tk.Toplevel):
-    """Edit backend/relay settings with a live connection test, plus UI preferences.
+    """Edit backend/relay settings with a live connection test.
 
     Relay connections are profiles: the combobox at the top of the relay box
     picks the one the fields below edit; Add/Rename/Delete manage the list.
     All profile edits happen on a draft copy of the settings and reach the
-    real object only through Save, so Cancel reverts them.
-
-    Strings in this dialog are wrapped in ``tr()`` as the worked example for
-    localisation; the other screens follow later.
+    real object only through Save, so Cancel reverts them. Everything that
+    is not about the connection lives in ``PreferencesDialog``.
     """
 
     def __init__(self, parent, settings, on_save, remote_factory=None):
@@ -169,26 +168,6 @@ class ConnectionDialog(tk.Toplevel):
         self.details.configure(padx=6, pady=4, highlightthickness=0)
         self.details.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
-        preferences = ttk.LabelFrame(body, text=tr("Preferences"), padding=8)
-        preferences.pack(fill=tk.X, pady=(10, 0))
-        preferences.columnconfigure(1, weight=1)
-        ttk.Label(preferences, text=tr("Language:")).grid(row=0, column=0, sticky="w")
-        self._language_codes = [code for code in UI_LANGUAGES if code in LANGUAGE_LABELS]
-        self.language_var = tk.StringVar(value=self._language_label(self.settings.ui_language))
-        self.language_combo = ttk.Combobox(
-            preferences,
-            textvariable=self.language_var,
-            values=[self._language_label(code) for code in self._language_codes],
-            state="readonly",
-            width=14,
-        )
-        self.language_combo.grid(row=0, column=1, sticky="w", padx=(6, 0))
-        self.language_combo.bind("<<ComboboxSelected>>", self._on_language_selected)
-        self.language_status_var = tk.StringVar(value="")
-        ttk.Label(preferences, textvariable=self.language_status_var, style="Muted.TLabel").grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(4, 0)
-        )
-
         self.storage_note_var = tk.StringVar(value="")
         ttk.Label(body, textvariable=self.storage_note_var, wraplength=480, style="Muted.TLabel").pack(
             anchor="w", pady=(10, 0)
@@ -232,10 +211,9 @@ class ConnectionDialog(tk.Toplevel):
         self._set_details("")
 
     def _ask_name(self, title, prompt, initial=""):
-        name = simpledialog.askstring(title, prompt, initialvalue=initial, parent=self)
+        name = ask_name(self, title, prompt, initial=initial)
         if name is None:
             return None
-        name = " ".join(name.split())
         if not name:
             messagebox.showerror(title, tr("Enter a name for the profile."), parent=self)
             return None
@@ -279,26 +257,6 @@ class ConnectionDialog(tk.Toplevel):
         self._set_details("")
 
     # --------------------------------------------------------------- actions
-    def _language_label(self, code):
-        # Language names are shown in their own language, so they are not translated.
-        return LANGUAGE_LABELS.get(code) or LANGUAGE_LABELS[self._language_codes[0]]
-
-    def _selected_language(self):
-        label = self.language_var.get()
-        for code in self._language_codes:
-            if self._language_label(code) == label:
-                return code
-        return self.settings.ui_language
-
-    def _on_language_selected(self, event=None):
-        """Persist the language immediately; it takes effect after a restart."""
-        code = self._selected_language()
-        if code == self.settings.ui_language:
-            return
-        self.settings.ui_language = code
-        error = self.settings.save()
-        self.language_status_var.set(error or tr("Restart TextEnhanceAI to apply the language."))
-
     def _toggle_key_visibility(self):
         self.key_entry.configure(show="" if self.show_key_var.get() else "•")
 

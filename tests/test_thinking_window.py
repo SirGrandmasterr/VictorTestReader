@@ -115,10 +115,10 @@ def test_restarting_a_key_replaces_its_entry_and_clear_keeps_running_requests():
 
 
 def test_state_text_pairs_glyph_and_translated_word():
-    assert state_text(STATE_THINKING) == "▶ thinking"
-    assert state_text(STATE_ERROR) == "✖ failed"
+    assert state_text(STATE_THINKING) == "◐ thinking"
+    assert state_text(STATE_ERROR) == "■ failed"
     set_language("de")
-    assert state_text(STATE_THINKING) == "▶ denkt nach"
+    assert state_text(STATE_THINKING) == "◐ denkt nach"
 
 
 # ------------------------------------------------------------ app labels

@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- TextEnhanceAI app icon: a rounded slate square with a white serif "T" and a
-     small accent dot. packaging/make_icon.py renders it to icon.ico / icon.icns. -->
+<!-- TextEnhanceAI app icon: a cream paper tile with a burnt-clay slab-serif "T"
+     and a moss-green underline (the "added text" mark of the review).
+     packaging/make_icon.py renders it to icon.ico / icon.icns; sizes up to 32 px
+     are drawn inverted (clay tile, cream T) for contrast on a taskbar. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <rect x="8" y="8" width="240" height="240" rx="52" ry="52" fill="#1f3a5f"/>
-  <rect x="60" y="62" width="136" height="30" rx="6" ry="6" fill="#ffffff"/>
-  <rect x="113" y="62" width="30" height="132" rx="6" ry="6" fill="#ffffff"/>
-  <circle cx="186" cy="182" r="18" fill="#f2b134"/>
+  <rect x="8" y="8" width="240" height="240" rx="56" ry="56" fill="#f6f1e8" stroke="#e3dacb" stroke-width="6"/>
+  <rect x="58" y="60" width="140" height="28" rx="4" ry="4" fill="#a84a25"/>
+  <rect x="58" y="60" width="14" height="44" rx="4" ry="4" fill="#a84a25"/>
+  <rect x="184" y="60" width="14" height="44" rx="4" ry="4" fill="#a84a25"/>
+  <rect x="113" y="60" width="30" height="126" rx="4" ry="4" fill="#a84a25"/>
+  <rect x="96" y="172" width="64" height="16" rx="4" ry="4" fill="#a84a25"/>
+  <path d="M66 214 C 100 202, 156 202, 190 214" stroke="#3d7a4f" stroke-width="13" fill="none" stroke-linecap="round"/>
 </svg>
