@@ -66,9 +66,15 @@ class ScratchpadLogger:
                     self._block(item.original_text),
                     "Proposed:\n\n",
                     self._block(item.proposed_text),
-                    "\n",
                 ]
             )
+            for index, hunk in enumerate(item.changed_hunks, 1):
+                if hunk.explanation:
+                    lines.append("- Change {0}: `{1}` \u2192 `{2}` \u2014 {3}\n".format(
+                        index, hunk.original_text.replace("`", "'"), hunk.proposed_text.replace("`", "'"),
+                        hunk.explanation,
+                    ))
+            lines.append("\n")
         if path.exists():
             with path.open("a", encoding="utf-8") as handle:
                 handle.write("\n---\n\n")

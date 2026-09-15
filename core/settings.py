@@ -62,6 +62,7 @@ class AppSettings:
     custom_modes: list = field(default_factory=list)  # [{"name", "instruction"}], see core.prompts
     chains: list = field(default_factory=list)  # [{"name", "steps"}], steps are built-in or custom mode names
     recent_files: list = field(default_factory=list)  # quick-editor files, most recent first
+    quick_explanations: bool = False  # ask the model to explain each change in the quick editor (one extra request)
     path: Path = field(default=None, repr=False, compare=False)
     load_error: str = field(default="", repr=False, compare=False)
 
@@ -79,6 +80,7 @@ class AppSettings:
         "custom_modes",
         "chains",
         "recent_files",
+        "quick_explanations",
     )
 
     # ------------------------------------------------------------ persistence
@@ -142,6 +144,10 @@ class AppSettings:
                 len(problems), "y" if len(problems) == 1 else "ies", "; ".join(problems[:3])
             )
             settings.load_error = (settings.load_error + " " + note).strip()
+        if "quick_explanations" in data:
+            settings.quick_explanations = bool(data["quick_explanations"])
+        else:
+            settings.quick_explanations = _env_bool(environ.get("TEAI_QUICK_EXPLAIN"), False)
         recent = data.get("recent_files")
         settings.recent_files = []
         for entry in (recent if isinstance(recent, list) else []):

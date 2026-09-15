@@ -18,6 +18,7 @@ class ChangeHunk:
     original_text: str
     proposed_text: str
     decision: str = PENDING
+    explanation: str = ""  # one line from the model or a canned sentence, see core.editing.explain_session
 
     @property
     def is_change(self):

@@ -20,7 +20,7 @@ from core.documents import (
     save_document,
     text_document,
 )
-from core.editing import run_chain
+from core.editing import explain_session, run_chain
 from core.ollama_service import OllamaService
 from core.prompts import EDITING_MODES, PROMPTS, build_chain, build_instruction, describe_chain, validate_custom_modes
 from core.scratchpad import ScratchpadLogger
@@ -279,6 +279,10 @@ class EditorApp:
             state=tk.DISABLED,
         )
         self.undo_button.grid(row=0, column=3, padx=4)
+        self.explain_var = tk.BooleanVar(value=self.settings.quick_explanations)
+        ttk.Checkbutton(
+            controls, text="Explain changes", variable=self.explain_var, command=self._on_explain_toggled
+        ).grid(row=0, column=4, padx=(10, 4), sticky="w")
         controls.columnconfigure(4, weight=1)
         self.save_preset_button = ttk.Button(
             controls, text="Save as preset...", command=self.save_custom_preset
@@ -568,6 +572,10 @@ class EditorApp:
         self.mode_description_var.set(build_instruction(mode, custom_modes=self.settings.custom_modes)
                                       if mode in self.settings.custom_mode_names() else "")
 
+    def _on_explain_toggled(self):
+        self.settings.quick_explanations = bool(self.explain_var.get())
+        self._save_settings()
+
     def save_custom_preset(self):
         """Store the last Custom instruction under a name of the user's choice."""
         instruction = self.last_custom_instruction.strip()
@@ -788,6 +796,9 @@ class EditorApp:
             return
         mode = self.mode_var.get()
         description = self._describe_steps(mode, steps)
+        explain = bool(self.explain_var.get())
+        # what the explanation prompt quotes as the instruction (every step of a chain)
+        explain_instruction = "\n".join(instruction for _, instruction in steps)
 
         service = self.service
         self.active_request_id += 1
@@ -830,6 +841,15 @@ class EditorApp:
                     full_text=full_text,
                 )
                 session.steps = chain.steps
+                if explain and session.review_items:
+                    self.generation_verb = "Explaining changes"
+                    self._progress_chars = 0
+                    try:
+                        explain_session(service, model, session, explain_instruction, cancel_event)
+                    except EditCancelled:
+                        pass  # the edit itself is done: open the review without explanations
+                    except Exception:
+                        pass  # explanations are best effort
                 self.events.put(("generation_result", request_id, revision_id, session))
             except EditCancelled as exc:
                 self.events.put(("generation_cancelled", request_id, exc))

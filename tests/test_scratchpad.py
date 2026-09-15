@@ -78,3 +78,13 @@ def test_chain_steps_are_logged_with_their_intermediate_output(tmp_path):
     single = build_edit_session("a", "b")
     single.steps = [ChainStep("Grammar", "g", "b")]
     assert "## Steps" not in logger.log_proposal(single).read_text(encoding="utf-8").split("---")[-1]
+
+
+def test_hunk_explanations_are_logged_under_the_suggestion(tmp_path):
+    session = build_edit_session("Teh cat.", "The cat.")
+    session.review_items[0].changed_hunks[0].explanation = "Typo fixed."
+    logger = ScratchpadLogger(tmp_path, now_provider=lambda: datetime(2026, 7, 12, 10, 11, 16))
+
+    content = logger.log_proposal(session).read_text(encoding="utf-8")
+
+    assert "- Change 1: `Teh` \u2192 `The` \u2014 Typo fixed." in content

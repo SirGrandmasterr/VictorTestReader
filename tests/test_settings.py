@@ -182,3 +182,14 @@ def test_recent_files_keep_order_cap_and_prune_missing_files(tmp_path):
 
     path.write_text(json.dumps({"recent_files": "not a list"}), encoding="utf-8")
     assert AppSettings.load(path, environ={}).recent_files == []
+
+
+def test_quick_explanations_default_off_seeded_by_env_and_persisted(tmp_path):
+    path = tmp_path / "settings.json"
+    assert AppSettings.load(path, environ={}).quick_explanations is False
+    assert AppSettings.load(path, environ={"TEAI_QUICK_EXPLAIN": "yes"}).quick_explanations is True
+    settings = AppSettings.load(path, environ={})
+    settings.quick_explanations = True
+    settings.save()
+    assert json.loads(path.read_text(encoding="utf-8"))["quick_explanations"] is True
+    assert AppSettings.load(path, environ={"TEAI_QUICK_EXPLAIN": "no"}).quick_explanations is True  # file wins

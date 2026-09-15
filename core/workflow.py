@@ -1695,24 +1695,39 @@ def _change_lines(segment_text, changes, first_number):
     return lines
 
 
+def _check_clause(check):
+    """``(who, what)`` for the explanation prompt: a CHECKS member or a free-text instruction.
+
+    ``check`` may be one of ``CHECKS`` (the manuscript review) or any other
+    string, which is used verbatim as the instruction the edit followed (the
+    quick editor's modes). ``changes`` given to the builders below only need
+    ``start``/``end``/``original_text``/``proposed_text``.
+    """
+    if check in CHECK_LABELS:
+        return "A {0} check".format(CHECK_LABELS[check].lower()), "Check: {0}".format(CHECK_DESCRIPTIONS[check])
+    return "An editing pass", "Instruction: {0}".format(str(check).strip())
+
+
 def build_explanation_messages(segment_text, changes, check, language=SAME_LANGUAGE, style_guide=""):
     """Build the prompt asking for one short explanation per change of one segment.
 
     The author's rules are appended after the check description so the
-    explanations do not argue against them.
+    explanations do not argue against them. ``check`` is a CHECKS member or
+    a plain instruction string (see ``_check_clause``).
     """
+    who, what = _check_clause(check)
     return [
         {"role": "system", "content": EXPLANATION_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
-                "A {0} check proposed the changes listed below for the text. For each "
+                "{0} proposed the changes listed below for the text. For each "
                 "numbered change, write one short explanation (at most 15 words, {1}) of "
                 "why the new version is better. Return a JSON object mapping the change "
                 "number to its explanation, e.g. {{\"1\": \"...\", \"2\": \"...\"}}.\n\n"
-                "Check: {2}{3}\n\nText:\n{4}\n\nChanges:\n{5}"
+                "{2}{3}\n\nText:\n{4}\n\nChanges:\n{5}"
             ).format(
-                CHECK_LABELS[check].lower(), _language_clause(language), CHECK_DESCRIPTIONS[check],
+                who, _language_clause(language), what,
                 format_style_guide(style_guide), segment_text, "\n".join(_change_lines(segment_text, changes, 1)),
             ),
         },
@@ -1736,19 +1751,20 @@ def build_grouped_explanation_messages(entries, check, language=SAME_LANGUAGE, s
             position, segment_text, "\n".join(_change_lines(segment_text, changes, number))
         ))
         number += len(changes)
+    who, what = _check_clause(check)
     return [
         {"role": "system", "content": EXPLANATION_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
-                "A {0} check proposed the changes listed below for {1} segments of a manuscript. For "
+                "{0} proposed the changes listed below for {1} segments of a manuscript. For "
                 "each numbered change, write one short explanation (at most 15 words, {2}) of why the "
                 "new version is better. Return a JSON object mapping the change number to its "
                 "explanation, e.g. {{\"1\": \"...\", \"2\": \"...\"}}.\n\n"
-                "Check: {3}{4}\n\n{5}"
+                "{3}{4}\n\n{5}"
             ).format(
-                CHECK_LABELS[check].lower(), len(entries), _language_clause(language),
-                CHECK_DESCRIPTIONS[check], format_style_guide(style_guide), "\n\n".join(blocks),
+                who, len(entries), _language_clause(language),
+                what, format_style_guide(style_guide), "\n\n".join(blocks),
             ),
         },
     ]

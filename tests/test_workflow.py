@@ -2155,3 +2155,18 @@ def test_resync_from_a_loaded_document_keeps_the_paragraph_locators(tmp_path):
     project.document["paragraphs"] = []
     resync_project(project, load_document(source))
     assert project.document_kind == KIND_DOCX and len(project.document["paragraphs"]) == len(load_document(source).paragraphs)
+
+
+def test_explanation_prompt_accepts_a_plain_instruction_instead_of_a_check():
+    text = "Teh cat sat."
+    changes = extract_changes(text, "The cat sat.", CHECK_SPELLING)
+    quick = build_explanation_messages(text, changes, "Fix grammar issues without altering the meaning.")
+    content = quick[1]["content"]
+    assert content.startswith("An editing pass proposed the changes listed below for the text.")
+    assert "Instruction: Fix grammar issues without altering the meaning." in content
+    assert "Check:" not in content and "1. \"Teh\" \u2192 \"The\"" in content
+    checked = build_explanation_messages(text, changes, CHECK_SPELLING)[1]["content"]
+    assert checked.startswith("A spelling check proposed") and "Check: Typos" in checked
+    grouped = build_grouped_explanation_messages([(text, changes), (text, changes)], "Polish it.")[1]["content"]
+    assert grouped.startswith("An editing pass proposed the changes listed below for 2 segments")
+    assert "Instruction: Polish it." in grouped
