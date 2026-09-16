@@ -11,6 +11,7 @@ venv/
 # Environment files and deployment secrets
 .env
 remote/**/.env
+remote/**/docker-compose.override.yml
 
 # OS files
 .DS_Store
