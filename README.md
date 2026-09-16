@@ -269,6 +269,21 @@ uv run pytest -q
 
 The test suite runs completely offline using simulated backends and recorded response cassettes (`tests/recorded/`), requiring no live Ollama or remote server. Re-recording live model responses for new prompts or samples is done via `python scripts/record_responses.py`.
 
+### Packaging Executables (Windows, macOS, Linux)
+
+TextEnhanceAI can be packaged into standalone client executables for Windows, macOS, and Linux using PyInstaller:
+
+```bash
+python packaging/build.py
+```
+
+This builds and archives:
+- **Windows**: `dist/TextEnhanceAI-v<version>-windows.zip`
+- **macOS**: `dist/TextEnhanceAI-v<version>-macos.dmg`
+- **Linux**: `dist/TextEnhanceAI-v<version>-linux.tar.gz`
+
+The GitHub Actions workflow also builds all three platforms automatically on every merge to `main` (uploaded as workflow artifacts) and on release tags `v*` (attached to GitHub releases). See [packaging/README.md](packaging/README.md) for details.
+
 ---
 
 ## Contact

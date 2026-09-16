@@ -5,9 +5,14 @@ on:
     branches: ["**"]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: write  # needed to attach the built archives to the release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -25,7 +30,7 @@ jobs:
   build:
     name: Package (${{ matrix.os }})
     needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -34,6 +39,8 @@ jobs:
             artifact: TextEnhanceAI-${{ github.ref_name }}-windows.zip
           - os: macos-latest
             artifact: TextEnhanceAI-${{ github.ref_name }}-macos.dmg
+          - os: ubuntu-latest
+            artifact: TextEnhanceAI-${{ github.ref_name }}-linux.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -54,15 +61,112 @@ jobs:
         if: runner.os == 'macOS'
         run: hdiutil create -volname TextEnhanceAI -srcfolder dist/TextEnhanceAI.app -ov -format UDZO "${{ matrix.artifact }}"
 
-      - uses: actions/upload-artifact@v4
+      - name: Tar the Linux build
+        if: runner.os == 'Linux'
+        run: tar -czf "${{ matrix.artifact }}" -C dist TextEnhanceAI
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
       - name: Attach to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.artifact }}
           body: |
             Unsigned builds: Windows shows a SmartScreen prompt on first start; on macOS
             right-click the app and choose Open the first time. See packaging/README.md.
+
+  deploy-server:
+    name: Deploy relay to Strato server
+    needs: test
+    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_KEY: ${{ secrets.DEPLOY_HOST_KEY }}
+        run: |
+          set -eu
+          if [ -z "${KEY:-}" ] || [ -z "${HOST_KEY:-}" ]; then
+            echo "Missing DEPLOY_SSH_KEY or DEPLOY_HOST_KEY repository secrets."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${HOST_KEY}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Update and rebuild relay on server
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST || '85.215.233.90' }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER || 'root' }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/root/projects/VictorTestReader' }}
+        run: |
+          set -eu
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              "${DEPLOY_USER}@${DEPLOY_HOST}" \
+              "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          echo "::group::Preflight"
+          cd "${DEPLOY_PATH}"
+          test -f remote/relay/.env || { echo "Missing remote/relay/.env at ${DEPLOY_PATH}"; exit 1; }
+          echo "::endgroup::"
+
+          echo "::group::Update repository"
+          git fetch --prune origin main
+          git checkout -B main origin/main
+          git --no-pager log -1 --format='%H %an %ad %s'
+          echo "::endgroup::"
+
+          echo "::group::Rebuild relay container"
+          cd remote/relay
+          docker compose up -d --build
+          echo "::endgroup::"
+
+          echo "::group::Verify local health"
+          for i in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8084/health || echo 000)"
+            if [ "${code}" = "200" ]; then
+              echo "Relay on 127.0.0.1:8084 is answering 200 OK"
+              break
+            fi
+            if [ "${i}" = "30" ]; then
+              echo "Relay failed to answer 200 after 30 attempts (last code: ${code})"
+              docker compose logs --tail 50 relay
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::endgroup::"
+
+          echo "::group::Reclaim disk"
+          docker image prune -f --filter 'until=168h'
+          echo "::endgroup::"
+
+          echo "Server build and deploy completed successfully."
+          REMOTE
+
+      - name: Public health check
+        run: |
+          set -eu
+          for i in $(seq 1 10); do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' https://fokus.voglerprojekte.com/health || echo 000)"
+            echo "https://fokus.voglerprojekte.com/health → ${code}"
+            if [ "${code}" = "200" ]; then
+              echo "Relay is reachable over public HTTPS."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Public health check failed."
+          exit 1
